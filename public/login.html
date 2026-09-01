@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ytgrab · sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #161b1f;
+    --bg-grade: #1b2126;
+    --card: #1f262b;
+    --amber: #e8a33d;
+    --text: #edeff0;
+    --muted: #8b98a0;
+    --border: #2b333a;
+    --danger: #e8664f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1200px 500px at 50% -10%, var(--bg-grade), transparent 60%), var(--bg);
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    width: 100%;
+    max-width: 360px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 22px;
+    text-align: center;
+  }
+  .wordmark { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+  .wordmark .dot { color: var(--amber); }
+  .tag {
+    margin-top: 4px;
+    margin-bottom: 22px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .input-shell {
+    background: #12161a;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0 14px;
+    transition: border-color 0.15s ease;
+  }
+  .input-shell:focus-within { border-color: var(--amber); }
+  input {
+    width: 100%;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 16px;
+    padding: 13px 4px;
+    text-align: center;
+    letter-spacing: 0.05em;
+  }
+  button {
+    width: 100%;
+    margin-top: 12px;
+    background: var(--amber);
+    color: #17110a;
+    border: none;
+    border-radius: 10px;
+    padding: 14px;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    min-height: 48px;
+  }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .error {
+    display: none;
+    margin-top: 14px;
+    color: var(--danger);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="wordmark">ytgrab<span class="dot">.</span></div>
+    <div class="tag">enter password to continue</div>
+    <form id="loginForm">
+      <div class="input-shell">
+        <input id="password" type="password" inputmode="text" autocomplete="current-password" autofocus placeholder="password" />
+      </div>
+      <button id="submitBtn" type="submit">Unlock</button>
+    </form>
+    <div class="error" id="errorMsg"></div>
+  </div>
+
+<script>
+const form = document.getElementById('loginForm');
+const passwordInput = document.getElementById('password');
+const submitBtn = document.getElementById('submitBtn');
+const errorMsg = document.getElementById('errorMsg');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const password = passwordInput.value;
+  if (!password) return;
+
+  submitBtn.disabled = true;
+  errorMsg.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Login failed');
+    window.location.href = '/';
+  } catch (err) {
+    errorMsg.textContent = err.message;
+    errorMsg.style.display = 'block';
+    passwordInput.select();
+    submitBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
