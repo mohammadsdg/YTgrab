@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 
-const PASSWORD = process.env.YTGRAB_PASSWORD || 'mamadsdg15';
+const PASSWORD = process.env.YTGRAB_PASSWORD;
 const SESSION_COOKIE = 'ytgrab_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
