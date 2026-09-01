@@ -6,7 +6,7 @@ I made this because I was tired of sketchy download sites full of ads. Used AI t
 ## What's in here
 
 - `server.js` — the app (Node + Express). Talks to `yt-dlp` + `ffmpeg` behind the scenes.
-- `index.html` / `login.html` — the UI. (I know it is good to use Reactjs and Next but who cares bruh, i just wanted to download stuff so html seems nice)
+- `index.html` / `login.html` — the UI. (I know it is good to use Reactjs and Next but who cares bruh, i just wanted to download videos and html was just easy to go)
 - `telegram-bot.js` — optional Telegram bot that talks to the server's API.
 
 ## Requirements
