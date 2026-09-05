@@ -257,16 +257,10 @@
     gap: 10px;
     margin-top: 22px;
   }
-  .ring-box {
-    position: relative;
-    width: 84px;
-    height: 84px;
-  }
   .ring {
     width: 84px;
     height: 84px;
     transform: rotate(-90deg);
-    display: block;
   }
   .ring circle {
     fill: none;
@@ -281,10 +275,8 @@
     transition: stroke-dashoffset 0.3s ease;
   }
   .ring-label {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    position: relative;
+    margin-top: -60px;
     font-family: 'IBM Plex Mono', monospace;
     font-size: 15px;
     font-weight: 500;
@@ -479,13 +471,11 @@
     <button class="grab-btn" id="go">Grab it</button>
 
     <div class="progress-wrap" id="progressWrap">
-      <div class="ring-box">
-        <svg class="ring" viewBox="0 0 84 84">
-          <circle class="track" cx="42" cy="42" r="36"></circle>
-          <circle class="fill" id="ringFill" cx="42" cy="42" r="36"></circle>
-        </svg>
-        <div class="ring-label" id="ringLabel">0%</div>
-      </div>
+      <svg class="ring" viewBox="0 0 84 84">
+        <circle class="track" cx="42" cy="42" r="36"></circle>
+        <circle class="fill" id="ringFill" cx="42" cy="42" r="36"></circle>
+      </svg>
+      <div class="ring-label" id="ringLabel">0%</div>
       <div class="status-text" id="statusText">starting…</div>
     </div>
 
@@ -758,7 +748,7 @@ function renderFiles(files) {
 
     const dlBtn = document.createElement('a');
     dlBtn.className = 'file-btn dl-btn';
-    dlBtn.href = `/files/${encodeURIComponent(f.name)}`;
+    dlBtn.href = f.url;
     dlBtn.setAttribute('download', '');
     dlBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>';
 
