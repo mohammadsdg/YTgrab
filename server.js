@@ -12,6 +12,8 @@ const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const DATA_DIR = path.join(__dirname, 'data');
 const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const CUSTOM_BACKGROUND_FILE = path.join(DATA_DIR, 'background.webp');
+const DEFAULT_BACKGROUND_FILE = path.join(__dirname, 'client', 'public', 'mountains.webp');
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
 
 const PASSWORD = process.env.YTGRAB_PASSWORD;
@@ -116,6 +118,7 @@ const PUBLIC_PATHS = new Set(['/api/login']);
 
 app.use((req, res, next) => {
   if (PUBLIC_PATHS.has(req.path)) return next();
+  if (req.method === 'GET' && req.path === '/api/background') return next();
   if (req.path.startsWith('/files/')) return next(); // has its own cookie-or-token check below
   if (!req.path.startsWith('/api/')) return next();
   if (isAuthed(req)) return next();
@@ -147,6 +150,57 @@ app.post('/api/logout', (req, res) => {
 
 app.get('/api/session', (req, res) => {
   res.json({ authenticated: true });
+});
+
+app.get('/api/background', (req, res) => {
+  const file = fs.existsSync(CUSTOM_BACKGROUND_FILE) ? CUSTOM_BACKGROUND_FILE : DEFAULT_BACKGROUND_FILE;
+  if (!fs.existsSync(file)) return res.status(404).send('Background not found.');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.type('image/webp').sendFile(file);
+});
+
+app.put('/api/background', express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '15mb' }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || req.body.length < 100) {
+    return res.status(400).json({ error: 'Choose a JPEG, PNG, or WebP image.' });
+  }
+  const temporary = path.join(DATA_DIR, `background-${crypto.randomBytes(8).toString('hex')}.upload`);
+  const converted = path.join(DATA_DIR, `background-${crypto.randomBytes(8).toString('hex')}.webp`);
+  fs.writeFileSync(temporary, req.body);
+  const args = [
+    '-hide_banner', '-loglevel', 'error', '-y', '-i', temporary,
+    '-vf', 'scale=min(1920\\,iw):-2', '-frames:v', '1',
+    '-c:v', 'libwebp', '-quality', '82', converted
+  ];
+  const proc = spawn('ffmpeg', args);
+  let stderr = '';
+  let settled = false;
+  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  proc.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    fs.unlink(temporary, () => {});
+    fs.unlink(converted, () => {});
+    res.status(500).json({ error: `Could not start ffmpeg: ${error.message}` });
+  });
+  proc.on('close', (code) => {
+    if (settled) return;
+    settled = true;
+    fs.unlink(temporary, () => {});
+    if (code !== 0 || !fs.existsSync(converted)) {
+      fs.unlink(converted, () => {});
+      return res.status(400).json({ error: stderr.slice(-500) || 'Could not convert that image.' });
+    }
+    fs.renameSync(converted, CUSTOM_BACKGROUND_FILE);
+    res.json({ ok: true, url: `/api/background?v=${Date.now()}` });
+  });
+});
+
+app.delete('/api/background', (req, res) => {
+  if (!fs.existsSync(CUSTOM_BACKGROUND_FILE)) return res.json({ ok: true });
+  fs.unlink(CUSTOM_BACKGROUND_FILE, (error) => {
+    if (error) return res.status(500).json({ error: 'Could not reset the background.' });
+    res.json({ ok: true, url: `/api/background?v=${Date.now()}` });
+  });
 });
 
 // ---------- protected app routes (everything below requires auth) ----------
@@ -182,6 +236,19 @@ function isValidYoutubeUrl(url) {
 
 function isValidVideoId(id) {
   return typeof id === 'string' && /^[A-Za-z0-9_-]{11}$/.test(id);
+}
+
+function proxiedImageUrl(url) {
+  return url ? `/api/image?url=${encodeURIComponent(url)}` : '';
+}
+
+function pickChannelImage(thumbnails, kind) {
+  if (!Array.isArray(thumbnails)) return '';
+  const named = thumbnails.filter((item) => String(item.id || '').toLowerCase().includes(kind));
+  const candidates = named.length ? named : thumbnails;
+  return candidates
+    .filter((item) => item && typeof item.url === 'string')
+    .sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)))[0]?.url || '';
 }
 
 function runYtDlp(args, timeoutMs = 30000) {
@@ -338,6 +405,8 @@ app.get('/api/channels/:id', async (req, res) => {
       `https://www.youtube.com/channel/${channelId}/videos`
     ], 45000);
     const data = JSON.parse(raw);
+    const avatarUrl = pickChannelImage(data.thumbnails, 'avatar');
+    const bannerUrl = pickChannelImage(data.thumbnails, 'banner');
     const videos = (data.entries || [])
       .filter((entry) => entry && isValidVideoId(entry.id))
       .map((entry) => ({
@@ -348,15 +417,19 @@ app.get('/api/channels/:id', async (req, res) => {
         duration: Number.isFinite(entry.duration) ? entry.duration : null,
         timestamp: entry.timestamp || null,
         viewCount: Number.isFinite(entry.view_count) ? entry.view_count : null,
+        channelAvatar: proxiedImageUrl(avatarUrl),
         thumbnail: `/api/thumbnail/${entry.id}`
       }));
     res.json({
       channel: {
         id: channelId,
         name: data.channel || data.uploader || videos[0]?.channel || 'Channel',
+        handle: data.uploader_id || '',
         description: data.description || '',
         followers: Number.isFinite(data.channel_follower_count) ? data.channel_follower_count : null,
-        videoCount: videos.length
+        videoCount: Number.isFinite(data.playlist_count) ? data.playlist_count : videos.length,
+        avatar: proxiedImageUrl(avatarUrl),
+        banner: proxiedImageUrl(bannerUrl)
       },
       videos
     });
@@ -387,33 +460,52 @@ app.post('/api/history', (req, res) => {
 
 app.get('/api/stream/:id', async (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  try {
-    const metadata = JSON.parse(await runYtDlp([
-      '--no-playlist', '--no-warnings', '--dump-single-json',
-      '-f', 'best[height<=720][ext=mp4]/best[height<=720]/best',
-      '--extractor-args', 'youtube:player_client=default,tv_simply',
-      `https://www.youtube.com/watch?v=${req.params.id}`
-    ], 30000));
-    const directUrl = metadata.url;
-    if (!/^https?:\/\//.test(directUrl)) throw new Error('No playable stream was found.');
-    const headers = { ...(metadata.http_headers || {}) };
-    if (req.headers.range) headers.Range = req.headers.range;
-    const upstream = await axios.get(directUrl, {
-      responseType: 'stream',
-      headers,
-      timeout: 20000,
-      maxRedirects: 3,
-      validateStatus: (status) => status === 200 || status === 206
-    });
-    res.status(upstream.status);
-    for (const header of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
-      if (upstream.headers[header]) res.setHeader(header, upstream.headers[header]);
+  const proc = spawn('yt-dlp', [
+    '--no-playlist', '--no-warnings',
+    '-f', 'best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best',
+    '--extractor-args', 'youtube:player_client=default,tv_simply',
+    '-o', '-',
+    `https://www.youtube.com/watch?v=${req.params.id}`
+  ]);
+  let stderr = '';
+  let started = false;
+  res.status(200);
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Cache-Control', 'no-store');
+  proc.stdout.once('data', (chunk) => {
+    started = true;
+    res.write(chunk);
+    proc.stdout.pipe(res);
+  });
+  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  proc.on('error', (error) => {
+    if (!res.headersSent) res.status(500).json({ error: error.message });
+    else res.destroy(error);
+  });
+  proc.on('close', (code) => {
+    if (!started && !res.writableEnded) {
+      if (!res.headersSent) res.status(502);
+      res.end(stderr.slice(-800) || `yt-dlp exited with code ${code}`);
     }
+  });
+  res.on('close', () => {
+    if (!proc.killed) proc.kill('SIGKILL');
+  });
+});
+
+app.get('/api/image', async (req, res) => {
+  try {
+    const url = new URL(String(req.query.url || ''));
+    const host = url.hostname.toLowerCase();
+    const allowed = host === 'yt3.ggpht.com' || host === 'yt3.googleusercontent.com' || host.endsWith('.ytimg.com');
+    if (url.protocol !== 'https:' || !allowed) return res.status(400).send('Invalid image URL.');
+    const upstream = await axios.get(url.toString(), { responseType: 'stream', timeout: 10000, maxRedirects: 2 });
+    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
     upstream.data.on('error', () => res.destroy());
-    res.on('close', () => upstream.data.destroy());
     upstream.data.pipe(res);
-  } catch (error) {
-    if (!res.headersSent) res.status(502).json({ error: error.message });
+  } catch {
+    if (!res.headersSent) res.status(502).send('Image unavailable.');
   }
 });
 

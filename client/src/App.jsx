@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
   IconButton, InputAdornment, Paper, Snackbar, Stack, Switch, TextField, Typography
@@ -6,7 +6,7 @@ import {
 import {
   AddRounded, ArrowBackRounded, CheckRounded, CloseRounded, DarkModeRounded, DownloadRounded, ExploreRounded,
   HomeRounded, LogoutRounded, PersonAddRounded, PlayArrowRounded, SearchRounded,
-  SettingsRounded, SubscriptionsRounded, VideoLibraryRounded
+  SettingsRounded, SubscriptionsRounded, UploadRounded, VideoLibraryRounded, WallpaperRounded
 } from '@mui/icons-material';
 
 const navItems = [
@@ -31,6 +31,10 @@ function formatDuration(value) {
   return hours
     ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
     : `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function textDirection(value) {
+  return /[\u0590-\u08ff]/.test(String(value || '')) ? 'rtl' : 'ltr';
 }
 
 function videoIdFromInput(value) {
@@ -79,10 +83,10 @@ function VideoCard({ video, subscriptions, onFollow, onPlay, onDownload, onChann
       {video.duration != null && <span className="duration">{formatDuration(video.duration)}</span>}
     </Box>
     <Box className="video-copy">
-      <Typography className="video-title">{video.title}</Typography>
+      <Typography className="video-title" dir={textDirection(video.title)}>{video.title}</Typography>
       <Stack direction="row" alignItems="center" spacing={1} mt={0.75}>
-        <Avatar className="tiny-avatar">{(video.channel || '?')[0]}</Avatar>
-        <button className="channel-link" onClick={() => video.channelId && onChannel(video.channelId)}>{video.channel || 'YouTube'}</button>
+        <Avatar className="tiny-avatar" src={video.channelAvatar || undefined}>{(video.channel || '?')[0]}</Avatar>
+        <button dir={textDirection(video.channel)} className="channel-link" onClick={() => video.channelId && onChannel(video.channelId)}>{video.channel || 'YouTube'}</button>
       </Stack>
       <Stack direction="row" spacing={1} mt={1.4}>
         {video.channelId && <Button className="soft-button" size="small" startIcon={following ? <CheckRounded /> : <PersonAddRounded />} onClick={() => onFollow(video)}>
@@ -119,8 +123,7 @@ export default function App({ mode, setMode }) {
   const [downloadState, setDownloadState] = useState(null);
   const [channelPage, setChannelPage] = useState(null);
   const [channelBusy, setChannelBusy] = useState(false);
-
-  const title = useMemo(() => navItems.find((item) => item.id === tab)?.label, [tab]);
+  const [backgroundBusy, setBackgroundBusy] = useState(false);
 
   const loadPersonalData = async () => {
     const [subs, watched, stored] = await Promise.all([
@@ -195,28 +198,59 @@ export default function App({ mode, setMode }) {
     } catch (err) { setDownloadState({ status: 'error', error: err.message }); }
   };
 
+  const uploadBackground = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setNotice('Choose a JPEG, PNG, or WebP image.');
+      return;
+    }
+    setBackgroundBusy(true);
+    try {
+      const response = await fetch('/api/background', {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type },
+        body: file
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not change the background.');
+      document.documentElement.style.setProperty('--app-background', `url("${data.url}")`);
+      setNotice('Background updated.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBackgroundBusy(false); }
+  };
+
+  const resetBackground = async () => {
+    setBackgroundBusy(true);
+    try {
+      const data = await api('/api/background', { method: 'DELETE' });
+      document.documentElement.style.setProperty('--app-background', `url("${data.url}")`);
+      setNotice('Default background restored.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBackgroundBusy(false); }
+  };
+
   if (auth === null) return <Box className="splash"><CircularProgress /></Box>;
   if (!auth) return <Login onLogin={() => { setAuth(true); loadPersonalData(); }} />;
 
   return <Box className="app-shell">
     <Box component="header" className="topbar">
-      <Stack direction="row" alignItems="center" spacing={1.2}>
-        <img className="brand-mark small" src="/ytgrab-mark.png" alt="" />
-        <Box><Typography className="eyebrow">YTGRAB</Typography><Typography variant="h5" fontWeight={700}>{channelPage?.channel?.name || title}</Typography></Box>
-      </Stack>
-      <Avatar className="profile-avatar">you</Avatar>
+      <img className="brand-mark small" src="/ytgrab-mark.png" alt="YTgrab" />
     </Box>
 
     <Box component="main" className="main-content">
       {channelPage ? <>
         <Button className="back-button" startIcon={<ArrowBackRounded />} onClick={() => setChannelPage(null)}>Back</Button>
         {channelBusy || !channelPage.channel ? <Box className="channel-loading"><CircularProgress /></Box> : <>
-          <Box className="channel-header">
-            <Avatar className="channel-avatar">{channelPage.channel.name[0]}</Avatar>
+          {channelPage.channel.banner && <img className="channel-banner" src={channelPage.channel.banner} alt="" />}
+          <Box className="channel-header" dir={textDirection(channelPage.channel.name)}>
+            <Avatar className="channel-avatar" src={channelPage.channel.avatar || undefined}>{channelPage.channel.name[0]}</Avatar>
             <Box className="channel-heading">
-              <Typography variant="h4" fontWeight={700}>{channelPage.channel.name}</Typography>
+              <Typography variant="h4" fontWeight={700} dir={textDirection(channelPage.channel.name)}>{channelPage.channel.name}</Typography>
+              {channelPage.channel.handle && <Typography dir="ltr" color="text.secondary">{channelPage.channel.handle}</Typography>}
               <Typography color="text.secondary">{channelPage.channel.followers ? `${channelPage.channel.followers.toLocaleString()} followers · ` : ''}{channelPage.videos.length} recent videos</Typography>
-              {channelPage.channel.description && <Typography className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
+              {channelPage.channel.description && <Typography dir={textDirection(channelPage.channel.description)} className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
             </Box>
             <Button variant={subscriptions.some((item) => item.id === channelPage.channel.id) ? 'outlined' : 'contained'} onClick={() => toggleFollow({ channelId: channelPage.channel.id, channel: channelPage.channel.name })}>
               {subscriptions.some((item) => item.id === channelPage.channel.id) ? 'Following' : 'Follow'}
@@ -236,7 +270,7 @@ export default function App({ mode, setMode }) {
         <Box className="search-hero">
           <Typography variant="h4" fontWeight={700}>Search</Typography>
           <Typography color="text.secondary">Find a video or paste a YouTube link.</Typography>
-          <TextField className="big-search" fullWidth value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
+          <TextField className="big-search" fullWidth value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" inputProps={{ dir: 'auto' }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
         </Box>
         <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
       </>}
@@ -261,6 +295,17 @@ export default function App({ mode, setMode }) {
           <Box flex={1}><Typography fontWeight={700}>Dark mode</Typography><Typography color="text.secondary" variant="body2">Use the dark interface.</Typography></Box>
           <Switch checked={mode === 'dark'} onChange={(event) => setMode(event.target.checked ? 'dark' : 'light')} />
         </Paper>
+        <Paper className="settings-card background-setting" elevation={0}>
+          <WallpaperRounded />
+          <Box flex={1}><Typography fontWeight={700}>Background</Typography><Typography color="text.secondary" variant="body2">Use any JPEG, PNG, or WebP image. It stays on this server.</Typography></Box>
+          <Stack direction="row" spacing={1}>
+            <Button component="label" variant="outlined" startIcon={<UploadRounded />} disabled={backgroundBusy}>
+              Choose image
+              <input hidden type="file" accept="image/jpeg,image/png,image/webp" onChange={uploadBackground} />
+            </Button>
+            <Button onClick={resetBackground} disabled={backgroundBusy}>Reset</Button>
+          </Stack>
+        </Paper>
         <Paper className="settings-card" elevation={0}>
           <Box className="telegram-orb">✈</Box>
           <Box flex={1}><Typography fontWeight={800}>Telegram companion</Typography><Typography color="text.secondary" variant="body2">Search, download, and receive links from your private bot.</Typography></Box>
@@ -280,7 +325,7 @@ export default function App({ mode, setMode }) {
 
     <Dialog open={Boolean(player)} onClose={() => setPlayer(null)} fullWidth maxWidth="md" PaperProps={{ className: 'player-dialog' }}>
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
-      {player && <><Box component="video" className="video-player" src={`/api/stream/${player.id}`} controls autoPlay playsInline /><DialogContent><Typography variant="h6" fontWeight={800}>{player.title}</Typography><Typography color="text.secondary">{player.channel}</Typography></DialogContent></>}
+      {player && <><Box component="video" className="video-player" src={`/api/stream/${player.id}`} controls autoPlay playsInline onError={() => setNotice('This video could not be streamed. Check the server log for the yt-dlp error.')} /><DialogContent><Typography variant="h6" fontWeight={800} dir={textDirection(player.title)}>{player.title}</Typography><Typography color="text.secondary" dir={textDirection(player.channel)}>{player.channel}</Typography></DialogContent></>}
     </Dialog>
 
     <Dialog open={Boolean(downloadVideo)} onClose={() => { setDownloadVideo(null); setDownloadState(null); }} fullWidth maxWidth="xs" PaperProps={{ className: 'download-dialog' }}>
