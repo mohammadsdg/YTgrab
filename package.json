@@ -2,15 +2,29 @@
   "name": "ytgrab",
   "version": "1.0.0",
   "private": true,
-  "description": "Self-hosted YouTube downloader",
+  "description": "Self-hosted YouTube search and downloader with a Telegram bot",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "build": "vite build --config client/vite.config.js",
+    "dev": "concurrently --kill-others --names api,ui \"node server.js\" \"vite --config client/vite.config.js\"",
+    "prestart": "npm run build",
+    "start": "concurrently --kill-others --names web,telegram \"node server.js\" \"node telegram-bot.js\"",
+    "start:web": "node server.js",
+    "start:bot": "node telegram-bot.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "axios": "^1.7.2",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.2",
+    "@mui/material": "^7.3.2",
+    "@vitejs/plugin-react": "^5.0.2",
+    "concurrently": "^9.2.1",
     "dotenv": "^16.4.5",
-    "node-telegram-bot-api": "0.66.0"
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "0.66.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vite": "^7.1.5"
   }
 }

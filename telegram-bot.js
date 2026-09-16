@@ -4,15 +4,37 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const YTGRAB_URL = (process.env.YTGRAB_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
-const YTGRAB_PASSWORD = process.env.YTGRAB_PASSWORD || '';
-const ALLOWED_IDS = (process.env.ALLOWED_USER_IDS || '')
+const YTGRAB_URL = process.env.YTGRAB_URL?.replace(/\/$/, '');
+const YTGRAB_PASSWORD = process.env.YTGRAB_PASSWORD;
+const ALLOWED_USER_IDS = process.env.ALLOWED_USER_IDS;
+
+const missingEnv = [
+  ['TELEGRAM_BOT_TOKEN', TOKEN],
+  ['YTGRAB_URL', YTGRAB_URL],
+  ['YTGRAB_PASSWORD', YTGRAB_PASSWORD],
+  ['ALLOWED_USER_IDS', ALLOWED_USER_IDS],
+].filter(([, value]) => !value).map(([name]) => name);
+
+if (missingEnv.length) {
+  console.error(`Missing required values in .env: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
+
+try {
+  const url = new URL(YTGRAB_URL);
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error();
+} catch {
+  console.error('YTGRAB_URL must be a valid http:// or https:// URL in .env');
+  process.exit(1);
+}
+
+const ALLOWED_IDS = ALLOWED_USER_IDS
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
-if (!TOKEN) {
-  console.error('Missing TELEGRAM_BOT_TOKEN in .env');
+if (ALLOWED_IDS.length === 0 || ALLOWED_IDS.some((id) => !/^\d+$/.test(id))) {
+  console.error('ALLOWED_USER_IDS must contain one or more numeric Telegram user IDs');
   process.exit(1);
 }
 
@@ -57,7 +79,6 @@ async function api(method, url, data) {
 }
 
 function isAllowed(userId) {
-  if (ALLOWED_IDS.length === 0) return true;
   return ALLOWED_IDS.includes(String(userId));
 }
 
@@ -66,19 +87,32 @@ function extractUrl(text) {
   return m ? m[0] : null;
 }
 
+function extractVideoId(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\.|^m\./g, '');
+    if (host === 'youtu.be') return url.pathname.split('/')[1] || null;
+    if (host === 'youtube.com') {
+      if (url.pathname === '/watch') return url.searchParams.get('v');
+      return url.pathname.match(/^\/(shorts|embed|live)\/([^/?]+)/)?.[2] || null;
+    }
+  } catch { return null; }
+  return null;
+}
+
 const QUALITIES = ['best', '2160', '1440', '1080', '720', '480', '360', 'audio'];
 
-function qualityKeyboard(url) {
+function qualityKeyboard(videoId) {
   return {
     inline_keyboard: [
       [
-        { text: '1080p', callback_data: `q:1080:${url}` },
-        { text: '720p', callback_data: `q:720:${url}` },
-        { text: '480p', callback_data: `q:480:${url}` },
+        { text: '1080p', callback_data: `q:1080:${videoId}` },
+        { text: '720p', callback_data: `q:720:${videoId}` },
+        { text: '480p', callback_data: `q:480:${videoId}` },
       ],
       [
-        { text: 'Best 🔥', callback_data: `q:best:${url}` },
-        { text: 'Just audio 🎧', callback_data: `q:audio:${url}` },
+        { text: 'Best 🔥', callback_data: `q:best:${videoId}` },
+        { text: 'Just audio 🎧', callback_data: `q:audio:${videoId}` },
       ],
     ],
   };
@@ -98,11 +132,28 @@ bot.on('message', async (msg) => {
   }
 
   const url = extractUrl(msg.text);
-  if (!url) return; // ignore anything that isn't a link
+  const videoId = url && extractVideoId(url);
+  if (videoId) {
+    return bot.sendMessage(msg.chat.id, 'bet, what quality you want?', {
+      reply_markup: qualityKeyboard(videoId),
+    });
+  }
 
-  bot.sendMessage(msg.chat.id, 'bet, what quality you want?', {
-    reply_markup: qualityKeyboard(url),
-  });
+  try {
+    const response = await api('get', `/api/search?q=${encodeURIComponent(msg.text.trim())}`);
+    const results = (response.data.results || []).slice(0, 6);
+    if (!results.length) return bot.sendMessage(msg.chat.id, 'nothing came up for that one');
+    return bot.sendMessage(msg.chat.id, 'here’s what I found', {
+      reply_markup: {
+        inline_keyboard: results.map((item) => [{
+          text: item.title.slice(0, 55),
+          callback_data: `v:${item.id}`,
+        }]),
+      },
+    });
+  } catch (err) {
+    return bot.sendMessage(msg.chat.id, `search failed — ${err.message}`);
+  }
 });
 
 const PROGRESS_LINES = ['still cooking', 'on it', 'grabbing it now', 'almost there', 'working on it'];
@@ -114,9 +165,19 @@ bot.on('callback_query', async (query) => {
     return bot.answerCallbackQuery(query.id, { text: "not for you, sorry 🙅" });
   }
 
-  const [, quality, ...urlParts] = query.data.split(':');
-  const url = urlParts.join(':'); // url itself may contain colons
+  if (query.data.startsWith('v:')) {
+    const videoId = query.data.slice(2);
+    if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return;
+    await bot.answerCallbackQuery(query.id);
+    return bot.sendMessage(query.message.chat.id, 'nice pick — choose a quality', {
+      reply_markup: qualityKeyboard(videoId),
+    });
+  }
+
+  const [, quality, videoId] = query.data.split(':');
   if (!QUALITIES.includes(quality)) return;
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return;
+  const url = `https://www.youtube.com/watch?v=${videoId}`;
 
   bot.answerCallbackQuery(query.id);
   const chatId = query.message.chat.id;

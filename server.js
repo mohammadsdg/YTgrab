@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -6,11 +7,23 @@ const crypto = require('crypto');
 const axios = require('axios');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT);
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+const DATA_DIR = path.join(__dirname, 'data');
+const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
 
-// Auth: change this via an env var if you want, otherwise this is the default.
-const PASSWORD = process.env.YTGRAB_PASSWORD || 'mamadsdg15';
+const PASSWORD = process.env.YTGRAB_PASSWORD;
+
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  console.error('PORT must be set to a valid port number in .env');
+  process.exit(1);
+}
+if (!PASSWORD) {
+  console.error('YTGRAB_PASSWORD must be set in .env');
+  process.exit(1);
+}
 const SESSION_COOKIE = 'ytgrab_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
@@ -25,6 +38,21 @@ const FILE_TOKEN_SECRET = crypto.randomBytes(32);
 const FILE_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+
+function readJsonFile(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(file, value) {
+  const temporary = `${file}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value, null, 2));
+  fs.renameSync(temporary, file);
+}
 
 app.use(express.json());
 
@@ -84,23 +112,17 @@ setInterval(() => {
   }
 }, 1000 * 60 * 30);
 
-const PUBLIC_PATHS = new Set(['/login', '/api/login']);
+const PUBLIC_PATHS = new Set(['/api/login']);
 
 app.use((req, res, next) => {
   if (PUBLIC_PATHS.has(req.path)) return next();
   if (req.path.startsWith('/files/')) return next(); // has its own cookie-or-token check below
+  if (!req.path.startsWith('/api/')) return next();
   if (isAuthed(req)) return next();
-  if (req.path.startsWith('/api/')) {
-    return res.status(401).json({ error: 'Not authenticated.' });
-  }
-  res.redirect('/login');
+  return res.status(401).json({ error: 'Not authenticated.' });
 });
 
 // ---------- auth routes ----------
-
-app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
 
 app.post('/api/login', (req, res) => {
   const { password } = req.body || {};
@@ -123,11 +145,11 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- protected app routes (everything below requires auth) ----------
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+app.get('/api/session', (req, res) => {
+  res.json({ authenticated: true });
 });
+
+// ---------- protected app routes (everything below requires auth) ----------
 
 app.get('/files/:name', (req, res) => {
   const name = path.basename(req.params.name); // block path traversal
@@ -160,6 +182,29 @@ function isValidYoutubeUrl(url) {
 
 function isValidVideoId(id) {
   return typeof id === 'string' && /^[A-Za-z0-9_-]{11}$/.test(id);
+}
+
+function runYtDlp(args, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('yt-dlp', args);
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs);
+    proc.stdout.on('data', (chunk) => {
+      if (stdout.length < 8 * 1024 * 1024) stdout += chunk.toString();
+      else proc.kill('SIGKILL');
+    });
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    proc.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return reject(new Error(stderr.slice(-800) || 'yt-dlp failed'));
+      resolve(stdout);
+    });
+  });
 }
 
 // Search runs on this server, so the browser never has to reach YouTube.
@@ -213,6 +258,7 @@ app.get('/api/search', (req, res) => {
           id: entry.id,
           title: entry.title || 'Untitled video',
           channel: entry.channel || entry.uploader || '',
+          channelId: entry.channel_id || entry.uploader_id || '',
           duration: Number.isFinite(entry.duration) ? entry.duration : null,
           url: `https://www.youtube.com/watch?v=${entry.id}`,
           thumbnail: `/api/thumbnail/${entry.id}`
@@ -223,6 +269,106 @@ app.get('/api/search', (req, res) => {
       res.status(502).json({ error: 'YouTube returned an unreadable search response.' });
     }
   });
+});
+
+// ---------- personal client ----------
+
+app.get('/api/subscriptions', (req, res) => {
+  res.json({ subscriptions: readJsonFile(SUBSCRIPTIONS_FILE, []) });
+});
+
+app.post('/api/subscriptions', (req, res) => {
+  const { id, name } = req.body || {};
+  if (typeof id !== 'string' || !/^UC[A-Za-z0-9_-]{20,30}$/.test(id) || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Invalid channel.' });
+  }
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []);
+  if (!subscriptions.some((channel) => channel.id === id)) {
+    subscriptions.push({ id, name: name.trim().slice(0, 100), followedAt: Date.now() });
+    writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
+  }
+  res.json({ subscriptions });
+});
+
+app.delete('/api/subscriptions/:id', (req, res) => {
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, [])
+    .filter((channel) => channel.id !== req.params.id);
+  writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
+  res.json({ subscriptions });
+});
+
+app.get('/api/feed', async (req, res) => {
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 8);
+  if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
+  try {
+    const feeds = await Promise.all(subscriptions.map(async (channel) => {
+      const raw = await runYtDlp([
+        '--flat-playlist', '--playlist-end', '5', '--dump-single-json', '--no-warnings',
+        `https://www.youtube.com/channel/${channel.id}/videos`
+      ], 45000);
+      const data = JSON.parse(raw);
+      return (data.entries || []).map((entry) => ({ ...entry, fallbackChannel: channel.name }));
+    }));
+    const videos = feeds.flat()
+      .filter((entry) => entry && isValidVideoId(entry.id))
+      .map((entry) => ({
+        id: entry.id,
+        title: entry.title || 'Untitled video',
+        channel: entry.channel || entry.uploader || entry.fallbackChannel,
+        channelId: entry.channel_id || entry.uploader_id || '',
+        duration: Number.isFinite(entry.duration) ? entry.duration : null,
+        timestamp: entry.timestamp || null,
+        thumbnail: `/api/thumbnail/${entry.id}`
+      }))
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    res.json({ videos });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+});
+
+app.get('/api/history', (req, res) => {
+  res.json({ history: readJsonFile(HISTORY_FILE, []) });
+});
+
+app.post('/api/history', (req, res) => {
+  const { id, title, channel } = req.body || {};
+  if (!isValidVideoId(id)) return res.status(400).json({ error: 'Invalid video.' });
+  const history = readJsonFile(HISTORY_FILE, []).filter((item) => item.id !== id);
+  history.unshift({ id, title: String(title || 'Untitled video').slice(0, 200), channel: String(channel || '').slice(0, 100), watchedAt: Date.now(), thumbnail: `/api/thumbnail/${id}` });
+  writeJsonFile(HISTORY_FILE, history.slice(0, 100));
+  res.json({ ok: true });
+});
+
+app.get('/api/stream/:id', async (req, res) => {
+  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
+  try {
+    const directUrl = (await runYtDlp([
+      '--no-playlist', '--no-warnings', '--get-url',
+      '-f', 'best[height<=720]/best',
+      '--extractor-args', 'youtube:player_client=default,tv_simply',
+      `https://www.youtube.com/watch?v=${req.params.id}`
+    ], 30000)).trim().split('\n')[0];
+    if (!/^https?:\/\//.test(directUrl)) throw new Error('No playable stream was found.');
+    const headers = {};
+    if (req.headers.range) headers.Range = req.headers.range;
+    const upstream = await axios.get(directUrl, {
+      responseType: 'stream',
+      headers,
+      timeout: 20000,
+      maxRedirects: 3,
+      validateStatus: (status) => status === 200 || status === 206
+    });
+    res.status(upstream.status);
+    for (const header of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+      if (upstream.headers[header]) res.setHeader(header, upstream.headers[header]);
+    }
+    upstream.data.on('error', () => res.destroy());
+    req.on('close', () => upstream.data.destroy());
+    upstream.data.pipe(res);
+  } catch (error) {
+    if (!res.headersSent) res.status(502).json({ error: error.message });
+  }
 });
 
 // Fixed upstream host + validated video ID avoids turning this into an open proxy.
@@ -367,6 +513,13 @@ app.delete('/api/files/:name', (req, res) => {
     res.json({ ok: true });
   });
 });
+
+if (fs.existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+  app.get('*', (req, res) => res.sendFile(path.join(CLIENT_DIST, 'index.html')));
+} else {
+  app.get('*', (req, res) => res.status(503).send('Client is not built. Run npm run build.'));
+}
 
 app.listen(PORT, () => {
   console.log(`ytgrab listening on http://127.0.0.1:${PORT}`);
