@@ -327,15 +327,60 @@ app.get('/api/feed', async (req, res) => {
   }
 });
 
+app.get('/api/channels/:id', async (req, res) => {
+  const channelId = req.params.id;
+  if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(channelId)) {
+    return res.status(400).json({ error: 'Invalid channel ID.' });
+  }
+  try {
+    const raw = await runYtDlp([
+      '--flat-playlist', '--playlist-end', '30', '--dump-single-json', '--no-warnings',
+      `https://www.youtube.com/channel/${channelId}/videos`
+    ], 45000);
+    const data = JSON.parse(raw);
+    const videos = (data.entries || [])
+      .filter((entry) => entry && isValidVideoId(entry.id))
+      .map((entry) => ({
+        id: entry.id,
+        title: entry.title || 'Untitled video',
+        channel: entry.channel || entry.uploader || data.channel || data.uploader || '',
+        channelId,
+        duration: Number.isFinite(entry.duration) ? entry.duration : null,
+        timestamp: entry.timestamp || null,
+        viewCount: Number.isFinite(entry.view_count) ? entry.view_count : null,
+        thumbnail: `/api/thumbnail/${entry.id}`
+      }));
+    res.json({
+      channel: {
+        id: channelId,
+        name: data.channel || data.uploader || videos[0]?.channel || 'Channel',
+        description: data.description || '',
+        followers: Number.isFinite(data.channel_follower_count) ? data.channel_follower_count : null,
+        videoCount: videos.length
+      },
+      videos
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+});
+
 app.get('/api/history', (req, res) => {
   res.json({ history: readJsonFile(HISTORY_FILE, []) });
 });
 
 app.post('/api/history', (req, res) => {
-  const { id, title, channel } = req.body || {};
+  const { id, title, channel, channelId } = req.body || {};
   if (!isValidVideoId(id)) return res.status(400).json({ error: 'Invalid video.' });
   const history = readJsonFile(HISTORY_FILE, []).filter((item) => item.id !== id);
-  history.unshift({ id, title: String(title || 'Untitled video').slice(0, 200), channel: String(channel || '').slice(0, 100), watchedAt: Date.now(), thumbnail: `/api/thumbnail/${id}` });
+  history.unshift({
+    id,
+    title: String(title || 'Untitled video').slice(0, 200),
+    channel: String(channel || '').slice(0, 100),
+    channelId: typeof channelId === 'string' ? channelId : '',
+    watchedAt: Date.now(),
+    thumbnail: `/api/thumbnail/${id}`
+  });
   writeJsonFile(HISTORY_FILE, history.slice(0, 100));
   res.json({ ok: true });
 });
@@ -343,14 +388,15 @@ app.post('/api/history', (req, res) => {
 app.get('/api/stream/:id', async (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
   try {
-    const directUrl = (await runYtDlp([
-      '--no-playlist', '--no-warnings', '--get-url',
-      '-f', 'best[height<=720]/best',
+    const metadata = JSON.parse(await runYtDlp([
+      '--no-playlist', '--no-warnings', '--dump-single-json',
+      '-f', 'best[height<=720][ext=mp4]/best[height<=720]/best',
       '--extractor-args', 'youtube:player_client=default,tv_simply',
       `https://www.youtube.com/watch?v=${req.params.id}`
-    ], 30000)).trim().split('\n')[0];
+    ], 30000));
+    const directUrl = metadata.url;
     if (!/^https?:\/\//.test(directUrl)) throw new Error('No playable stream was found.');
-    const headers = {};
+    const headers = { ...(metadata.http_headers || {}) };
     if (req.headers.range) headers.Range = req.headers.range;
     const upstream = await axios.get(directUrl, {
       responseType: 'stream',
@@ -364,7 +410,7 @@ app.get('/api/stream/:id', async (req, res) => {
       if (upstream.headers[header]) res.setHeader(header, upstream.headers[header]);
     }
     upstream.data.on('error', () => res.destroy());
-    req.on('close', () => upstream.data.destroy());
+    res.on('close', () => upstream.data.destroy());
     upstream.data.pipe(res);
   } catch (error) {
     if (!res.headersSent) res.status(502).json({ error: error.message });

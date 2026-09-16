@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
-  IconButton, InputAdornment, Paper, Snackbar, Stack, TextField, Typography
+  IconButton, InputAdornment, Paper, Snackbar, Stack, Switch, TextField, Typography
 } from '@mui/material';
 import {
-  AddRounded, CheckRounded, CloseRounded, DownloadRounded, ExploreRounded,
+  AddRounded, ArrowBackRounded, CheckRounded, CloseRounded, DarkModeRounded, DownloadRounded, ExploreRounded,
   HomeRounded, LogoutRounded, PersonAddRounded, PlayArrowRounded, SearchRounded,
   SettingsRounded, SubscriptionsRounded, VideoLibraryRounded
 } from '@mui/icons-material';
@@ -71,7 +71,7 @@ function Login({ onLogin }) {
   </Box>;
 }
 
-function VideoCard({ video, subscriptions, onFollow, onPlay, onDownload }) {
+function VideoCard({ video, subscriptions, onFollow, onPlay, onDownload, onChannel }) {
   const following = subscriptions.some((item) => item.id === video.channelId);
   return <Paper className="video-card" elevation={0}>
     <Box className="thumb-wrap" onClick={() => onPlay(video)}>
@@ -83,7 +83,7 @@ function VideoCard({ video, subscriptions, onFollow, onPlay, onDownload }) {
       <Typography className="video-title">{video.title}</Typography>
       <Stack direction="row" alignItems="center" spacing={1} mt={0.75}>
         <Avatar className="tiny-avatar">{(video.channel || '?')[0]}</Avatar>
-        <Typography variant="caption" color="text.secondary" noWrap>{video.channel || 'YouTube'}</Typography>
+        <button className="channel-link" onClick={() => video.channelId && onChannel(video.channelId)}>{video.channel || 'YouTube'}</button>
       </Stack>
       <Stack direction="row" spacing={1} mt={1.4}>
         {video.channelId && <Button className="soft-button" size="small" startIcon={following ? <CheckRounded /> : <PersonAddRounded />} onClick={() => onFollow(video)}>
@@ -104,7 +104,7 @@ function EmptyState({ icon: Icon, title, text, action }) {
   </Box>;
 }
 
-export default function App() {
+export default function App({ mode, setMode }) {
   const [auth, setAuth] = useState(null);
   const [tab, setTab] = useState('home');
   const [query, setQuery] = useState('');
@@ -118,6 +118,8 @@ export default function App() {
   const [player, setPlayer] = useState(null);
   const [downloadVideo, setDownloadVideo] = useState(null);
   const [downloadState, setDownloadState] = useState(null);
+  const [channelPage, setChannelPage] = useState(null);
+  const [channelBusy, setChannelBusy] = useState(false);
 
   const title = useMemo(() => navItems.find((item) => item.id === tab)?.label, [tab]);
 
@@ -167,6 +169,15 @@ export default function App() {
     api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
   };
 
+  const openChannel = async (channelId) => {
+    if (!channelId) return;
+    setChannelBusy(true);
+    setChannelPage({ channel: null, videos: [] });
+    try { setChannelPage(await api(`/api/channels/${encodeURIComponent(channelId)}`)); }
+    catch (err) { setChannelPage(null); setNotice(err.message); }
+    finally { setChannelBusy(false); }
+  };
+
   const startDownload = async (quality) => {
     const video = downloadVideo;
     setDownloadState({ status: 'starting', progress: 0 });
@@ -192,28 +203,43 @@ export default function App() {
     <Box component="header" className="topbar">
       <Stack direction="row" alignItems="center" spacing={1.2}>
         <Box className="brand-mark small">Y</Box>
-        <Box><Typography className="eyebrow">YOUR YOUTUBE</Typography><Typography variant="h5" fontWeight={800}>{title}</Typography></Box>
+        <Box><Typography className="eyebrow">YTGRAB</Typography><Typography variant="h5" fontWeight={700}>{channelPage?.channel?.name || title}</Typography></Box>
       </Stack>
       <Avatar className="profile-avatar">you</Avatar>
     </Box>
 
     <Box component="main" className="main-content">
+      {channelPage ? <>
+        <Button className="back-button" startIcon={<ArrowBackRounded />} onClick={() => setChannelPage(null)}>Back</Button>
+        {channelBusy || !channelPage.channel ? <Box className="channel-loading"><CircularProgress /></Box> : <>
+          <Box className="channel-header">
+            <Avatar className="channel-avatar">{channelPage.channel.name[0]}</Avatar>
+            <Box className="channel-heading">
+              <Typography variant="h4" fontWeight={700}>{channelPage.channel.name}</Typography>
+              <Typography color="text.secondary">{channelPage.channel.followers ? `${channelPage.channel.followers.toLocaleString()} followers · ` : ''}{channelPage.videos.length} recent videos</Typography>
+              {channelPage.channel.description && <Typography className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
+            </Box>
+            <Button variant={subscriptions.some((item) => item.id === channelPage.channel.id) ? 'outlined' : 'contained'} onClick={() => toggleFollow({ channelId: channelPage.channel.id, channel: channelPage.channel.name })}>
+              {subscriptions.some((item) => item.id === channelPage.channel.id) ? 'Following' : 'Follow'}
+            </Button>
+          </Box>
+          <Typography className="section-title">Videos</Typography>
+          <Box className="video-grid">{channelPage.videos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
+        </>}
+      </> : <>
       {tab === 'home' && <>
-        <Box className="hero">
-          <Box><Typography variant="h4" fontWeight={850}>Good to see you.</Typography><Typography color="text.secondary">Fresh videos from people you care about.</Typography></Box>
-          <Button variant="contained" startIcon={<SearchRounded />} onClick={() => setTab('search')}>Explore</Button>
-        </Box>
-        {feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} />)}</Box>
+        <Box className="page-heading"><Typography variant="h4" fontWeight={700}>Latest</Typography><Typography color="text.secondary">New videos from channels you follow.</Typography></Box>
+        {feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
           : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => setTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
       </>}
 
       {tab === 'search' && <>
         <Box className="search-hero">
-          <Typography variant="h4" fontWeight={850}>What are you curious about?</Typography>
-          <Typography color="text.secondary">Search naturally, or paste a YouTube link.</Typography>
+          <Typography variant="h4" fontWeight={700}>Search</Typography>
+          <Typography color="text.secondary">Find a video or paste a YouTube link.</Typography>
           <TextField className="big-search" fullWidth value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
         </Box>
-        <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} />)}</Box>
+        <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
       </>}
 
       {tab === 'library' && <>
@@ -224,13 +250,18 @@ export default function App() {
           {!subscriptions.length && <Typography color="text.secondary">No channels followed yet.</Typography>}
         </Stack>
         <Typography className="section-title">Recently watched</Typography>
-        {history.length ? <Box className="video-grid compact">{history.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} />)}</Box> : <Typography color="text.secondary">Videos you watch will appear here.</Typography>}
+        {history.length ? <Box className="video-grid compact">{history.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box> : <Typography color="text.secondary">Videos you watch will appear here.</Typography>}
         <Typography className="section-title">Downloads</Typography>
         <Stack spacing={1}>{files.map((file) => <Paper className="file-item" key={file.name} elevation={0}><Box><Typography fontWeight={700} noWrap>{file.name}</Typography><Typography variant="caption" color="text.secondary">{(file.size / 1048576).toFixed(1)} MB</Typography></Box><Button href={file.url} startIcon={<DownloadRounded />}>Save</Button></Paper>)}</Stack>
       </>}
 
       {tab === 'settings' && <>
-        <Typography variant="h4" fontWeight={850} mb={3}>Make it yours</Typography>
+        <Typography variant="h4" fontWeight={700} mb={3}>Settings</Typography>
+        <Paper className="settings-card" elevation={0}>
+          <DarkModeRounded />
+          <Box flex={1}><Typography fontWeight={700}>Dark mode</Typography><Typography color="text.secondary" variant="body2">Use the dark interface.</Typography></Box>
+          <Switch checked={mode === 'dark'} onChange={(event) => setMode(event.target.checked ? 'dark' : 'light')} />
+        </Paper>
         <Paper className="settings-card" elevation={0}>
           <Box className="telegram-orb">✈</Box>
           <Box flex={1}><Typography fontWeight={800}>Telegram companion</Typography><Typography color="text.secondary" variant="body2">Search, download, and receive links from your private bot.</Typography></Box>
@@ -241,10 +272,11 @@ export default function App() {
           <Button color="error" startIcon={<LogoutRounded />} onClick={async () => { await api('/api/logout', { method: 'POST' }); setAuth(false); }}>Log out</Button>
         </Paper>
       </>}
+      </>}
     </Box>
 
     <Paper component="nav" className="mobile-dock" elevation={0}>
-      {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon /><span>{label}</span></button>)}
+      {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={!channelPage && tab === id ? 'active' : ''} onClick={() => { setChannelPage(null); setTab(id); }}><Icon /><span>{label}</span></button>)}
     </Paper>
 
     <Dialog open={Boolean(player)} onClose={() => setPlayer(null)} fullWidth maxWidth="md" PaperProps={{ className: 'player-dialog' }}>
