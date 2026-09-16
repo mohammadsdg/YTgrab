@@ -19,9 +19,9 @@ function Root() {
   const theme = useMemo(() => createTheme({
     palette: {
       mode,
-      primary: { main: '#ff4e45' },
+      primary: { main: '#9b4dff' },
       background: mode === 'dark'
-        ? { default: '#0e0e0f', paper: '#18181a' }
+        ? { default: '#08080a', paper: '#151419' }
         : { default: '#f7f7f6', paper: '#ffffff' },
       text: mode === 'dark'
         ? { primary: '#f4f4f2', secondary: '#a4a4a0' }

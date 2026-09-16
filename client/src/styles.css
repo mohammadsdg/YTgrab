@@ -1,13 +1,13 @@
 :root {
   font-family: Vazirmatn, system-ui, sans-serif;
-  --bg: #0e0e0f;
-  --surface: #18181a;
-  --surface-2: #222225;
+  --bg: #08080a;
+  --surface: #151419;
+  --surface-2: #211e28;
   --text: #f4f4f2;
   --muted: #a4a4a0;
-  --line: #2b2b2e;
-  --nav: rgba(25,25,27,.94);
-  --accent: #ff4e45;
+  --line: #2a2731;
+  --nav: rgba(15,14,18,.9);
+  --accent: #a34fff;
 }
 :root[data-theme='light'] {
   --bg: #f7f7f6;
@@ -21,12 +21,18 @@
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; min-height: 100%; }
 body { min-height: 100vh; background: var(--bg); color: var(--text); }
+body::before { content: ''; position: fixed; z-index: -2; inset: 0; background: url('/mountains.png') center/cover no-repeat; opacity: .2; }
+body::after { content: ''; position: fixed; z-index: -1; inset: 0; background: linear-gradient(to bottom, rgba(8,8,10,.42), var(--bg) 88%); pointer-events: none; }
+:root[data-theme='light'] body::before { opacity: .1; filter: grayscale(.45); }
+:root[data-theme='light'] body::after { background: rgba(247,247,246,.76); }
 button, input { font: inherit; }
 .splash, .login-page { min-height: 100vh; display: grid; place-items: center; }
 .login-page { padding: 20px; }
-.login-card { width: min(400px,100%); padding: 34px !important; border: 1px solid var(--line); border-radius: 16px !important; display: flex; flex-direction: column; gap: 18px; background: var(--surface) !important; }
-.brand-mark { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; color: #fff; background: var(--accent); font-size: 23px; font-weight: 700; }
-.brand-mark.small { width: 38px; height: 38px; border-radius: 10px; font-size: 18px; }
+.login-card { width: min(380px,100%); padding: 38px 34px 34px !important; border: 1px solid rgba(255,255,255,.09); border-radius: 18px !important; display: flex; flex-direction: column; align-items: stretch; gap: 18px; background: rgba(15,14,18,.78) !important; backdrop-filter: blur(22px); box-shadow: 0 28px 80px rgba(0,0,0,.38) !important; }
+.login-mark { width: 112px; height: 112px; object-fit: contain; align-self: center; filter: drop-shadow(0 14px 25px rgba(122,42,213,.24)); }
+.login-heading { text-align: center; margin: -8px 0 6px; }
+.brand-mark { width: 48px; height: 48px; object-fit: contain; }
+.brand-mark.small { width: 42px; height: 42px; }
 .app-shell { min-height: 100vh; padding-bottom: 100px; }
 .topbar { height: 72px; padding: 12px max(24px,calc((100vw - 1280px)/2)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 10; }
 .eyebrow { color: var(--accent); font-size: 9px !important; font-weight: 700 !important; letter-spacing: .14em !important; }

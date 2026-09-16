@@ -61,12 +61,11 @@ function Login({ onLogin }) {
   };
   return <Box className="login-page">
     <Paper className="login-card" elevation={0} component="form" onSubmit={submit}>
-      <Box className="brand-mark">Y</Box>
-      <Typography variant="h4" fontWeight={800}>Welcome home</Typography>
-      <Typography color="text.secondary">Your private corner of YouTube.</Typography>
-      <TextField fullWidth type="password" label="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+      <img className="login-mark" src="/ytgrab-mark.png" alt="" />
+      <Box className="login-heading"><Typography variant="h4" fontWeight={700}>YTgrab</Typography><Typography color="text.secondary">Your place.</Typography></Box>
+      <TextField fullWidth type="password" label="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus autoComplete="current-password" />
       {error && <Alert severity="error">{error}</Alert>}
-      <Button size="large" variant="contained" type="submit" disabled={busy}>{busy ? 'Opening…' : 'Open YTgrab'}</Button>
+      <Button size="large" variant="contained" type="submit" disabled={busy}>{busy ? 'Opening…' : 'Come in'}</Button>
     </Paper>
   </Box>;
 }
@@ -202,7 +201,7 @@ export default function App({ mode, setMode }) {
   return <Box className="app-shell">
     <Box component="header" className="topbar">
       <Stack direction="row" alignItems="center" spacing={1.2}>
-        <Box className="brand-mark small">Y</Box>
+        <img className="brand-mark small" src="/ytgrab-mark.png" alt="" />
         <Box><Typography className="eyebrow">YTGRAB</Typography><Typography variant="h5" fontWeight={700}>{channelPage?.channel?.name || title}</Typography></Box>
       </Stack>
       <Avatar className="profile-avatar">you</Avatar>
