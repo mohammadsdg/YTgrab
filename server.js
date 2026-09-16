@@ -148,6 +148,7 @@ const expensiveLimiter = rateLimit({
 
 app.use((req, res, next) => {
   if (PUBLIC_PATHS.has(req.path)) return next();
+  if (req.method === 'GET' && req.path === '/api/background') return next();
   if (req.path.startsWith('/files/')) return next();
   if (!req.path.startsWith('/api/') && !req.path.startsWith('/files/')) return next();
   if (isAuthed(req)) return next();
