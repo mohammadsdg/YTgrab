@@ -25,6 +25,7 @@
     "express": "^4.19.2",
     "hls.js": "^1.6.13",
     "node-telegram-bot-api": "0.66.0",
+    "plyr": "^3.8.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "vite": "^7.1.5"

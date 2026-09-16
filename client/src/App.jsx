@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import Plyr from 'plyr';
+import 'plyr/dist/plyr.css';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
   IconButton, InputAdornment, Paper, Snackbar, Stack, Switch, TextField, Typography
@@ -58,11 +60,16 @@ function HlsPlayer({ src, onError }) {
     if (!video || !src) return undefined;
     let hls;
     let cancelled = false;
+    const player = new Plyr(video, {
+      controls: ['play-large', 'play', 'progress', 'current-time', 'duration', 'mute', 'volume', 'settings', 'fullscreen'],
+      settings: ['speed'],
+      seekTime: 10
+    });
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
       video.play().catch(() => {});
-      return () => { video.removeAttribute('src'); video.load(); };
+      return () => { player.destroy(); video.removeAttribute('src'); video.load(); };
     }
 
     import('hls.js').then(({ default: Hls }) => {
@@ -71,10 +78,13 @@ function HlsPlayer({ src, onError }) {
         onError('HLS playback is not supported by this browser.');
         return;
       }
-      hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      hls = new Hls({ enableWorker: true, lowLatencyMode: false, startPosition: 0 });
       hls.loadSource(src);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.currentTime = 0;
+        video.play().catch(() => {});
+      });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -90,6 +100,7 @@ function HlsPlayer({ src, onError }) {
     return () => {
       cancelled = true;
       if (hls) hls.destroy();
+      player.destroy();
     };
   }, [src]);
 
@@ -169,6 +180,8 @@ export default function App({ mode, setMode }) {
   const [notice, setNotice] = useState('');
   const [player, setPlayer] = useState(null);
   const [playerStatus, setPlayerStatus] = useState(null);
+  const [playerQuality, setPlayerQuality] = useState('720');
+  const playerRequestRef = useRef(0);
   const [downloadVideo, setDownloadVideo] = useState(null);
   const [downloadState, setDownloadState] = useState(null);
   const [channelPage, setChannelPage] = useState(null);
@@ -216,10 +229,11 @@ export default function App({ mode, setMode }) {
     } catch (err) { setNotice(err.message); }
   };
 
-  const pollStream = (videoId) => {
+  const pollStream = (videoId, quality, requestId) => {
     const check = async () => {
       try {
-        const state = await api(`/api/stream/${videoId}/status`);
+        const state = await api(`/api/stream/${videoId}/status?quality=${quality}`);
+        if (playerRequestRef.current !== requestId) return;
         setPlayerStatus({ id: videoId, ...state });
         if (!['done', 'error'].includes(state.status)) setTimeout(check, 1500);
       } catch (error) {
@@ -229,17 +243,25 @@ export default function App({ mode, setMode }) {
     setTimeout(check, 800);
   };
 
-  const play = async (video) => {
-    setPlayer(video);
+  const preparePlayback = async (video, quality) => {
+    const requestId = ++playerRequestRef.current;
     setPlayerStatus({ id: video.id, status: 'starting', progress: 0 });
-    api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
     try {
-      const state = await api(`/api/stream/${video.id}/prepare`, { method: 'POST' });
+      const state = await api(`/api/stream/${video.id}/prepare?quality=${quality}`, { method: 'POST' });
+      if (playerRequestRef.current !== requestId) return;
       setPlayerStatus({ id: video.id, ...state });
-      if (!['done', 'error'].includes(state.status)) pollStream(video.id);
+      if (!['done', 'error'].includes(state.status)) pollStream(video.id, quality, requestId);
     } catch (error) {
+      if (playerRequestRef.current !== requestId) return;
       setPlayerStatus({ id: video.id, status: 'error', error: error.message });
     }
+  };
+
+  const play = async (video) => {
+    setPlayer(video);
+    setPlayerQuality('720');
+    api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
+    preparePlayback(video, '720');
   };
 
   const openChannel = async (channelId) => {
@@ -399,6 +421,12 @@ export default function App({ mode, setMode }) {
     <Dialog open={Boolean(player)} onClose={() => setPlayer(null)} fullWidth maxWidth="md" PaperProps={{ className: 'player-dialog' }}>
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
       {player && <>
+        <Stack className="player-quality" direction="row" spacing={1}>
+          {['360', '480', '720'].map((quality) => <Button key={quality} size="small" variant={playerQuality === quality ? 'contained' : 'outlined'} onClick={() => {
+            setPlayerQuality(quality);
+            preparePlayback(player, quality);
+          }}>{quality}p</Button>)}
+        </Stack>
         {playerStatus?.id === player.id && playerStatus.status === 'done'
           ? <HlsPlayer src={`${playerStatus.url}?v=1`} onError={(detail) => setNotice(`Playback failed: ${detail}`)} />
           : <Box className="player-preparing">
