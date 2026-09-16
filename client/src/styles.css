@@ -90,13 +90,24 @@ button, input { font: inherit; }
 .mobile-dock button svg { font-size: 22px; }
 .mobile-dock button span { font-size: 10px; font-weight: 500; }
 .mobile-dock button.active { color: var(--text); background: var(--surface-2); }
-.player-dialog, .download-dialog { border: 1px solid var(--line); border-radius: 14px !important; overflow: hidden; background: var(--surface) !important; }
+.player-dialog { border: 1px solid var(--line); border-radius: 14px !important; overflow: hidden; background: var(--surface) !important; }
+.player-host { width: 100%; aspect-ratio: 16/9; background: #000; }
 .video-player { width: 100%; display: block; aspect-ratio: 16/9; background: #000; }
 .player-quality { padding: 10px 12px; background: #08080a; border-bottom: 1px solid var(--line); }
 .player-dialog { --plyr-color-main: var(--accent); }
 .player-preparing { width: 100%; min-height: 360px; padding: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; background: #08080a; }
 .dialog-close { position: absolute !important; z-index: 2; top: 8px; right: 8px; color: #fff !important; background: rgba(0,0,0,.55) !important; }
 .load-more-sentinel { min-height: 72px; display: grid; place-items: center; }
+.download-queue { position: fixed; z-index: 40; right: 18px; bottom: 94px; width: min(370px,calc(100vw - 36px)); max-height: min(440px,55vh); border: 1px solid var(--line); border-radius: 12px !important; overflow: hidden; color: var(--text) !important; background: var(--surface) !important; animation: queue-in .2s ease-out; }
+.download-queue-heading { height: 48px; padding: 0 13px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.download-queue-heading > :last-child { margin-left: auto; }
+.download-queue-list { max-height: calc(min(440px,55vh) - 48px); overflow-y: auto; }
+.download-job { min-width: 0; padding: 10px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+.download-job:last-child { border-bottom: 0; }
+.download-job > img { width: 72px; aspect-ratio: 16/9; flex: 0 0 auto; border-radius: 6px; object-fit: cover; background: var(--surface-2); }
+.download-job-copy { min-width: 0; flex: 1; }
+.download-job-copy .MuiLinearProgress-root { height: 3px; margin-top: 6px; border-radius: 3px; }
+@keyframes queue-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 1050px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media (max-width: 760px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(2,minmax(0,1fr)); } }
@@ -128,4 +139,5 @@ button, input { font: inherit; }
   .subscription-card .MuiAvatar-root { width: 54px; height: 54px; }
   .downloads-grid { grid-template-columns: 1fr; }
   .file-item > img, .file-placeholder { width: 104px; }
+  .download-queue { right: 12px; bottom: 92px; width: calc(100vw - 24px); max-height: 45vh; }
 }

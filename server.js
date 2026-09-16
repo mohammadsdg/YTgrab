@@ -376,34 +376,45 @@ app.delete('/api/subscriptions/:id', (req, res) => {
 });
 
 app.get('/api/feed', async (req, res) => {
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 8);
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
   if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
   try {
     const page = Math.max(1, Math.min(20, Number.parseInt(req.query.page, 10) || 1));
     const perChannel = 5;
     const start = ((page - 1) * perChannel) + 1;
     const end = page * perChannel;
-    const feeds = await Promise.all(subscriptions.map(async (channel) => {
+    const attempts = await Promise.allSettled(subscriptions.map(async (channel) => {
       const raw = await runYtDlp([
         '--flat-playlist', '--playlist-start', String(start), '--playlist-end', String(end), '--dump-single-json', '--no-warnings',
         `https://www.youtube.com/channel/${channel.id}/videos`
       ], 45000);
       const data = JSON.parse(raw);
-      return (data.entries || []).map((entry) => ({ ...entry, fallbackChannel: channel.name }));
+      return (data.entries || []).map((entry) => ({
+        ...entry,
+        fallbackChannel: channel.name,
+        fallbackChannelId: channel.id,
+        fallbackAvatar: channel.avatar || `/api/channel-avatar/${channel.id}`
+      }));
     }));
-    const videos = feeds.flat()
+    const videos = attempts
+      .filter((attempt) => attempt.status === 'fulfilled')
+      .flatMap((attempt) => attempt.value)
       .filter((entry) => entry && isValidVideoId(entry.id))
       .map((entry) => ({
         id: entry.id,
         title: entry.title || 'Untitled video',
         channel: entry.channel || entry.uploader || entry.fallbackChannel,
-        channelId: entry.channel_id || entry.uploader_id || '',
+        channelId: entry.channel_id || entry.uploader_id || entry.fallbackChannelId || '',
         duration: Number.isFinite(entry.duration) ? entry.duration : null,
         timestamp: entry.timestamp || null,
         thumbnail: `/api/thumbnail/${entry.id}`,
-        channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : channel.avatar
+        channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : entry.fallbackAvatar
       }))
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    if (!videos.length && attempts.every((attempt) => attempt.status === 'rejected')) {
+      const firstError = attempts.find((attempt) => attempt.status === 'rejected')?.reason;
+      throw firstError || new Error('Could not load subscriptions.');
+    }
     res.json({ videos, page, hasMore: videos.length > 0 });
   } catch (error) {
     res.status(502).json({ error: error.message });

@@ -3,7 +3,7 @@ import Plyr from 'plyr';
 import 'plyr/dist/plyr.css';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
-  IconButton, InputAdornment, Paper, Snackbar, Stack, Switch, TextField, Typography
+  IconButton, InputAdornment, LinearProgress, Paper, Snackbar, Stack, Switch, TextField, Typography
 } from '@mui/material';
 import {
   AddRounded, ArrowBackRounded, CheckRounded, CloseRounded, DarkModeRounded, DeleteOutlineRounded, DownloadRounded, ExpandMoreRounded, ExploreRounded,
@@ -54,11 +54,20 @@ function videoIdFromInput(value) {
 }
 
 function HlsPlayer({ src, onError }) {
-  const videoRef = useRef(null);
+  const hostRef = useRef(null);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !src) return undefined;
+    const host = hostRef.current;
+    if (!host || !src) return undefined;
+    const video = document.createElement('video');
+    video.className = 'video-player';
+    video.controls = true;
+    video.playsInline = true;
+    const handleMediaError = () => {
+      if (video.error) onError(video.error.message || `media error code ${video.error.code}`);
+    };
+    video.addEventListener('error', handleMediaError);
+    host.replaceChildren(video);
     let hls;
     let cancelled = false;
     const player = new Plyr(video, {
@@ -70,7 +79,12 @@ function HlsPlayer({ src, onError }) {
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
       video.play().catch(() => {});
-      return () => { player.destroy(); video.removeAttribute('src'); video.load(); };
+      return () => {
+        video.pause();
+        video.removeEventListener('error', handleMediaError);
+        player.destroy();
+        host.replaceChildren();
+      };
     }
 
     import('hls.js').then(({ default: Hls }) => {
@@ -101,14 +115,14 @@ function HlsPlayer({ src, onError }) {
     return () => {
       cancelled = true;
       if (hls) hls.destroy();
+      video.pause();
+      video.removeEventListener('error', handleMediaError);
       player.destroy();
+      host.replaceChildren();
     };
   }, [src]);
 
-  return <video ref={videoRef} className="video-player" controls playsInline onError={(event) => {
-    const mediaError = event.currentTarget.error;
-    if (mediaError) onError(mediaError.message || `media error code ${mediaError.code}`);
-  }} />;
+  return <div ref={hostRef} className="player-host" />;
 }
 
 function Login({ onLogin }) {
@@ -188,8 +202,7 @@ export default function App({ mode, setMode }) {
   const [playerStatus, setPlayerStatus] = useState(null);
   const [playerQuality, setPlayerQuality] = useState('720');
   const playerRequestRef = useRef(0);
-  const [downloadVideo, setDownloadVideo] = useState(null);
-  const [downloadState, setDownloadState] = useState(null);
+  const [downloadJobs, setDownloadJobs] = useState([]);
   const [channelPage, setChannelPage] = useState(null);
   const [channelBusy, setChannelBusy] = useState(false);
   const [channelPageNumber, setChannelPageNumber] = useState(1);
@@ -300,22 +313,32 @@ export default function App({ mode, setMode }) {
     finally { setChannelBusy(false); }
   };
 
-  const startDownload = async (quality) => {
-    const video = downloadVideo;
-    setDownloadState({ status: 'starting', progress: 0 });
+  const updateDownloadJob = (key, patch) => {
+    setDownloadJobs((current) => current.map((job) => job.key === key ? { ...job, ...patch } : job));
+  };
+
+  const pollDownload = (key, id) => {
+    const check = async () => {
+      try {
+        const state = await api(`/api/status/${id}`);
+        updateDownloadJob(key, state);
+        if (!['done', 'error'].includes(state.status)) setTimeout(check, 1200);
+        if (state.status === 'done') setFiles((await api('/api/files')).files);
+      } catch (error) {
+        updateDownloadJob(key, { status: 'error', error: error.message });
+      }
+    };
+    setTimeout(check, 700);
+  };
+
+  const startDownload = async (video, quality = '720') => {
+    const key = `${video.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setDownloadJobs((current) => [...current, { key, video, quality, status: 'starting', progress: 0 }]);
     try {
       const started = await api('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${video.id}`, quality, video }) });
-      const timer = setInterval(async () => {
-        try {
-          const state = await api(`/api/status/${started.id}`);
-          setDownloadState(state);
-          if (state.status === 'done' || state.status === 'error') {
-            clearInterval(timer);
-            if (state.status === 'done') setFiles((await api('/api/files')).files);
-          }
-        } catch (err) { clearInterval(timer); setDownloadState({ status: 'error', error: err.message }); }
-      }, 1500);
-    } catch (err) { setDownloadState({ status: 'error', error: err.message }); }
+      updateDownloadJob(key, { id: started.id, status: 'processing' });
+      pollDownload(key, started.id);
+    } catch (error) { updateDownloadJob(key, { status: 'error', error: error.message }); }
   };
 
   const deleteFile = async (file) => {
@@ -432,13 +455,13 @@ export default function App({ mode, setMode }) {
             {channelPage.channel.description && <Typography dir={textDirection(channelPage.channel.description)} className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
           </Box>
           <Typography className="section-title">Videos</Typography>
-          <Box className="video-grid">{channelPage.videos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
+          <Box className="video-grid">{channelPage.videos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={startDownload} onChannel={openChannel} />)}</Box>
           <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>
         </>}
       </> : <>
       {tab === 'home' && <>
         <Box className="page-heading"><Typography variant="h4" fontWeight={700}>Latest</Typography><Typography color="text.secondary">New videos from channels you follow.</Typography></Box>
-        {feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
+        {feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={startDownload} onChannel={openChannel} />)}</Box>
           : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => setTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
         {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
       </>}
@@ -449,7 +472,7 @@ export default function App({ mode, setMode }) {
           <Typography color="text.secondary">Find a video or paste a YouTube link.</Typography>
           <TextField className="big-search" fullWidth value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" inputProps={{ dir: 'auto' }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
         </Box>
-        <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
+        <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={startDownload} onChannel={openChannel} />)}</Box>
         <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>
       </>}
 
@@ -461,7 +484,7 @@ export default function App({ mode, setMode }) {
           {!subscriptions.length && <Typography color="text.secondary">No channels followed yet.</Typography>}
         </Box>
         <button className={`history-toggle ${historyOpen ? 'open' : ''}`} onClick={() => setHistoryOpen((open) => !open)}><span>Watch history</span><span>{history.length} videos</span><ExpandMoreRounded /></button>
-        {historyOpen && (history.length ? <Box className="video-grid compact">{history.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box> : <Typography color="text.secondary">Nothing watched yet.</Typography>)}
+        {historyOpen && (history.length ? <Box className="video-grid compact">{history.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={startDownload} onChannel={openChannel} />)}</Box> : <Typography color="text.secondary">Nothing watched yet.</Typography>)}
         <Typography className="section-title">Downloads</Typography>
         <Box className="downloads-grid">{files.map((file) => <Paper className="file-item" key={file.name} elevation={0}>{file.thumbnail ? <img src={file.thumbnail} alt="" /> : <Box className="file-placeholder"><VideoLibraryRounded /></Box>}<Box className="file-copy"><Typography fontWeight={700} noWrap>{file.title || file.name}</Typography>{file.channel && <Typography variant="body2" color="text.secondary" noWrap>{file.channel}</Typography>}<Typography variant="caption" color="text.secondary">{(file.size / 1048576).toFixed(1)} MB</Typography></Box><Box className="file-actions"><IconButton href={file.url} aria-label="Save"><DownloadRounded /></IconButton><IconButton color="error" onClick={() => deleteFile(file)} aria-label="Delete"><DeleteOutlineRounded /></IconButton></Box></Paper>)}</Box>
       </>}
@@ -521,14 +544,19 @@ export default function App({ mode, setMode }) {
       </>}
     </Dialog>
 
-    <Dialog open={Boolean(downloadVideo)} onClose={() => { setDownloadVideo(null); setDownloadState(null); }} fullWidth maxWidth="xs" PaperProps={{ className: 'download-dialog' }}>
-      <DialogContent>
-        <Typography variant="h6" fontWeight={800}>Download video</Typography>
-        <Typography color="text.secondary" mb={2}>{downloadVideo?.title}</Typography>
-        {!downloadState && <Stack direction="row" flexWrap="wrap" gap={1}>{[['1080','1080p'],['720','720p'],['480','480p'],['audio','Audio'],['best','Best']].map(([value,label]) => <Button key={value} variant="outlined" onClick={() => startDownload(value)}>{label}</Button>)}</Stack>}
-        {downloadState && <Box><Typography>{downloadState.status === 'done' ? 'Ready to save' : downloadState.status === 'error' ? downloadState.error : `Downloading… ${Math.round(downloadState.progress || 0)}%`}</Typography>{downloadState.status === 'done' && <Button sx={{ mt: 2 }} variant="contained" href={downloadState.url}>Save file</Button>}</Box>}
-      </DialogContent>
-    </Dialog>
+    {downloadJobs.length > 0 && <Paper className="download-queue" elevation={8}>
+      <Box className="download-queue-heading"><DownloadRounded /><Typography fontWeight={800}>Downloads</Typography><Typography variant="caption" color="text.secondary">{downloadJobs.filter((job) => !['done', 'error'].includes(job.status)).length} active</Typography></Box>
+      <Box className="download-queue-list">{downloadJobs.map((job) => <Box className="download-job" key={job.key}>
+        <img src={job.video.thumbnail || `/api/thumbnail/${job.video.id}`} alt="" />
+        <Box className="download-job-copy">
+          <Typography variant="body2" fontWeight={700} noWrap>{job.video.title}</Typography>
+          <Typography variant="caption" color={job.status === 'error' ? 'error' : 'text.secondary'} noWrap>{job.status === 'done' ? 'Ready' : job.status === 'error' ? job.error : `Downloading · ${Math.round(job.progress || 0)}%`}</Typography>
+          {!['done', 'error'].includes(job.status) && <LinearProgress variant={job.progress ? 'determinate' : 'indeterminate'} value={job.progress || 0} />}
+        </Box>
+        {job.status === 'done' && <IconButton size="small" href={job.url} aria-label="Save download"><DownloadRounded fontSize="small" /></IconButton>}
+        {['done', 'error'].includes(job.status) && <IconButton size="small" onClick={() => setDownloadJobs((current) => current.filter((item) => item.key !== job.key))} aria-label="Dismiss"><CloseRounded fontSize="small" /></IconButton>}
+      </Box>)}</Box>
+    </Paper>}
 
     <Snackbar open={Boolean(notice)} autoHideDuration={3500} onClose={() => setNotice('')} message={notice} />
   </Box>;
