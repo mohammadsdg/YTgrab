@@ -40,7 +40,7 @@ TELEGRAM_BOT_TOKEN=your-bot-token
 ALLOWED_USER_IDS=your-telegram-user-id
 ```
 
-`YTGRAB_URL` should be your public HTTPS address if you want download links from the Telegram bot to work outside the server.
+Use whatever password you want. `YTGRAB_URL` should be the address where you open YTgrab.
 
 Start it:
 
@@ -68,4 +68,4 @@ pm2 save
 pm2 startup
 ```
 
-That's pretty much it. Use HTTPS if the server is exposed to the internet.
+That's pretty much it.

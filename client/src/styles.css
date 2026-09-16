@@ -92,6 +92,8 @@ button, input { font: inherit; }
 .mobile-dock button.active { color: var(--text); background: var(--surface-2); }
 .player-dialog { border: 1px solid var(--line); border-radius: 14px !important; overflow: hidden; background: var(--surface) !important; }
 .player-host { width: 100%; aspect-ratio: 16/9; background: #000; }
+.player-host.audio-only { min-height: 150px; aspect-ratio: auto; display: grid; place-items: center; padding: 32px; }
+.player-host.audio-only .plyr { width: min(620px,100%); }
 .video-player { width: 100%; display: block; aspect-ratio: 16/9; background: #000; }
 .player-quality { padding: 10px 12px; background: #08080a; border-bottom: 1px solid var(--line); }
 .player-dialog { --plyr-color-main: var(--accent); }
@@ -107,6 +109,7 @@ button, input { font: inherit; }
 .download-job > img { width: 72px; aspect-ratio: 16/9; flex: 0 0 auto; border-radius: 6px; object-fit: cover; background: var(--surface-2); }
 .download-job-copy { min-width: 0; flex: 1; }
 .download-job-copy .MuiLinearProgress-root { height: 3px; margin-top: 6px; border-radius: 3px; }
+.download-menu { min-width: 210px; border: 1px solid var(--line); background: var(--surface) !important; }
 @keyframes queue-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 
 @media (max-width: 1050px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(3,minmax(0,1fr)); } }

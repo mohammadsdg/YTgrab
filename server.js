@@ -5,6 +5,8 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const axios = require('axios');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
 
 const app = express();
 const PORT = Number(process.env.PORT);
@@ -28,6 +30,7 @@ if (!PASSWORD) {
   console.error('YTGRAB_PASSWORD must be set in .env');
   process.exit(1);
 }
+app.disable('x-powered-by');
 const SESSION_COOKIE = 'ytgrab_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
@@ -35,14 +38,12 @@ const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
-const STREAM_CACHE_VERSION = 'hls-v3';
-const STREAM_QUALITIES = new Set(['360', '480', '720']);
-
-// Signed download tokens: let tools like aria2/wget/curl (which don't carry
-// browser cookies) fetch a specific file without logging in, as long as
-// they have a link the GUI generated for them.
-const FILE_TOKEN_SECRET = crypto.randomBytes(32);
-const FILE_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const STREAM_CACHE_VERSION = 'hls-v4';
+const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
+const MAX_ACTIVE_DOWNLOADS = 6;
+const MAX_ACTIVE_STREAMS = 4;
+const DOWNLOAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const DOWNLOAD_TOKEN_SECRET = crypto.createHash('sha256').update(`ytgrab-download:${PASSWORD}`).digest();
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -62,7 +63,11 @@ function writeJsonFile(file, value) {
   fs.renameSync(temporary, file);
 }
 
-app.use(express.json());
+app.use(helmet({
+  contentSecurityPolicy: false,
+  strictTransportSecurity: false
+}));
+app.use(express.json({ limit: '64kb', strict: true }));
 
 // ---------- auth helpers ----------
 
@@ -89,27 +94,23 @@ function isAuthed(req) {
   return true;
 }
 
-function signFileToken(filename, expiry) {
-  return crypto.createHmac('sha256', FILE_TOKEN_SECRET).update(`${filename}:${expiry}`).digest('hex');
-}
-
 function makeFileToken(filename) {
-  const expiry = Date.now() + FILE_TOKEN_TTL_MS;
-  return `${expiry}.${signFileToken(filename, expiry)}`;
+  const expires = Date.now() + DOWNLOAD_TOKEN_TTL_MS;
+  const signature = crypto.createHmac('sha256', DOWNLOAD_TOKEN_SECRET).update(`${filename}:${expires}`).digest('hex');
+  return `${expires}.${signature}`;
 }
 
 function verifyFileToken(filename, token) {
-  if (!token || typeof token !== 'string') return false;
-  const dot = token.indexOf('.');
-  if (dot === -1) return false;
-  const expiry = Number(token.slice(0, dot));
-  const sig = token.slice(dot + 1);
-  if (!expiry || expiry < Date.now()) return false;
-  const expected = signFileToken(filename, expiry);
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  if (typeof token !== 'string' || token.length > 100) return false;
+  const separator = token.indexOf('.');
+  if (separator < 1) return false;
+  const expiresText = token.slice(0, separator);
+  const signature = token.slice(separator + 1);
+  if (!/^\d{13}$/.test(expiresText) || !/^[a-f0-9]{64}$/.test(signature)) return false;
+  const expires = Number(expiresText);
+  if (!Number.isSafeInteger(expires) || expires <= Date.now()) return false;
+  const expected = crypto.createHmac('sha256', DOWNLOAD_TOKEN_SECRET).update(`${filename}:${expires}`).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'));
 }
 
 // periodically sweep expired sessions so the Map doesn't grow forever
@@ -122,18 +123,41 @@ setInterval(() => {
 
 const PUBLIC_PATHS = new Set(['/api/login']);
 
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many login attempts. Try again later.' }
+});
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 1200,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  skip: (req) => req.path.startsWith('/hls/')
+});
+const expensiveLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 80,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many media requests. Give the server a moment.' }
+});
+
 app.use((req, res, next) => {
   if (PUBLIC_PATHS.has(req.path)) return next();
-  if (req.method === 'GET' && req.path === '/api/background') return next();
-  if (req.path.startsWith('/files/')) return next(); // has its own cookie-or-token check below
-  if (!req.path.startsWith('/api/')) return next();
+  if (req.path.startsWith('/files/')) return next();
+  if (!req.path.startsWith('/api/') && !req.path.startsWith('/files/')) return next();
   if (isAuthed(req)) return next();
   return res.status(401).json({ error: 'Not authenticated.' });
 });
+app.use('/api', apiLimiter);
 
 // ---------- auth routes ----------
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', loginLimiter, (req, res) => {
   const { password } = req.body || {};
   if (password !== PASSWORD) {
     return res.status(401).json({ error: 'Wrong password.' });
@@ -150,7 +174,7 @@ app.post('/api/login', (req, res) => {
 app.post('/api/logout', (req, res) => {
   const token = parseCookies(req)[SESSION_COOKIE];
   if (token) sessions.delete(token);
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`);
   res.json({ ok: true });
 });
 
@@ -219,9 +243,8 @@ app.get('/files/:name', (req, res) => {
     return res.status(404).send('Not found.');
   }
 
-  const authed = isAuthed(req) || verifyFileToken(name, req.query.token);
-  if (!authed) {
-    return res.status(401).send('Not authenticated. Use the download link from the ytgrab page — it carries a valid token.');
+  if (!isAuthed(req) && !verifyFileToken(name, req.query.token)) {
+    return res.status(401).send('This download link is invalid or has expired.');
   }
 
   res.download(fp, name);
@@ -282,7 +305,7 @@ function runYtDlp(args, timeoutMs = 30000) {
 }
 
 // Search runs on this server, so the browser never has to reach YouTube.
-app.get('/api/search', (req, res) => {
+app.get('/api/search', expensiveLimiter, (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (!query || query.length > 200) {
     return res.status(400).json({ error: 'Search must be between 1 and 200 characters.' });
@@ -356,13 +379,13 @@ app.get('/api/subscriptions', (req, res) => {
 });
 
 app.post('/api/subscriptions', (req, res) => {
-  const { id, name, avatar } = req.body || {};
+  const { id, name } = req.body || {};
   if (typeof id !== 'string' || !/^UC[A-Za-z0-9_-]{20,30}$/.test(id) || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Invalid channel.' });
   }
   const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []);
   if (!subscriptions.some((channel) => channel.id === id)) {
-    subscriptions.push({ id, name: name.trim().slice(0, 100), avatar: typeof avatar === 'string' ? avatar : `/api/channel-avatar/${id}`, followedAt: Date.now() });
+    subscriptions.push({ id, name: name.trim().slice(0, 100), avatar: `/api/channel-avatar/${id}`, followedAt: Date.now() });
     writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
   }
   res.json({ subscriptions });
@@ -375,7 +398,7 @@ app.delete('/api/subscriptions/:id', (req, res) => {
   res.json({ subscriptions });
 });
 
-app.get('/api/feed', async (req, res) => {
+app.get('/api/feed', expensiveLimiter, async (req, res) => {
   const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
   if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
   try {
@@ -421,7 +444,7 @@ app.get('/api/feed', async (req, res) => {
   }
 });
 
-app.get('/api/channels/:id', async (req, res) => {
+app.get('/api/channels/:id', expensiveLimiter, async (req, res) => {
   const channelId = req.params.id;
   if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(channelId)) {
     return res.status(400).json({ error: 'Invalid channel ID.' });
@@ -492,7 +515,7 @@ app.post('/api/history', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/stream/:id/prepare', (req, res) => {
+app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const videoId = req.params.id;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
   const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
@@ -509,13 +532,18 @@ app.post('/api/stream/:id/prepare', (req, res) => {
   } else {
     delete streamJobs[jobKey];
   }
+  const activeStreams = Object.values(streamJobs).filter((job) => ['downloading', 'converting'].includes(job.status)).length;
+  if (activeStreams >= MAX_ACTIVE_STREAMS) return res.status(429).json({ error: 'The stream server is busy. Try again in a moment.' });
 
   console.log(`[stream:${videoId}:${quality}] preparing HLS stream`);
   streamJobs[jobKey] = { status: 'downloading', progress: 0, quality };
   const sourceTemplate = path.join(STREAM_DIR, `${videoId}-${quality}-source.%(ext)s`);
+  const format = quality === 'audio'
+    ? 'ba/bestaudio/b'
+    : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
   const downloader = spawn('yt-dlp', [
     '--no-playlist', '--newline',
-    '-f', `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`,
+    '-f', format,
     '--merge-output-format', 'mkv',
     '--extractor-args', 'youtube:player_client=default,tv_simply',
     '-o', sourceTemplate,
@@ -549,12 +577,17 @@ app.post('/api/stream/:id/prepare', (req, res) => {
     fs.mkdirSync(buildingDir);
     const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
     const segmentTemplate = path.join(buildingDir, 'segment-%05d.m4s');
+    const mediaArgs = quality === 'audio'
+      ? ['-vn', '-c:a', 'aac', '-b:a', '256k']
+      : [
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+          '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.1', '-tag:v', 'avc1',
+          '-force_key_frames', 'expr:gte(t,n_forced*6)',
+          '-c:a', 'aac', '-b:a', '192k'
+        ];
     const converter = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
-      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
-      '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.0', '-tag:v', 'avc1',
-      '-force_key_frames', 'expr:gte(t,n_forced*6)',
-      '-c:a', 'aac', '-b:a', '160k',
+      ...mediaArgs,
       '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'event',
       '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
       '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
@@ -621,11 +654,11 @@ app.get('/api/image', async (req, res) => {
     const host = url.hostname.toLowerCase();
     const allowed = host === 'yt3.ggpht.com' || host === 'yt3.googleusercontent.com' || host.endsWith('.ytimg.com');
     if (url.protocol !== 'https:' || !allowed) return res.status(400).send('Invalid image URL.');
-    const upstream = await axios.get(url.toString(), { responseType: 'stream', timeout: 10000, maxRedirects: 2 });
+    const upstream = await axios.get(url.toString(), { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 });
+    if (!String(upstream.headers['content-type'] || '').startsWith('image/')) return res.status(502).send('Invalid image response.');
     res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=86400');
-    upstream.data.on('error', () => res.destroy());
-    upstream.data.pipe(res);
+    res.send(Buffer.from(upstream.data));
   } catch {
     if (!res.headersSent) res.status(502).send('Image unavailable.');
   }
@@ -637,12 +670,11 @@ app.get('/api/thumbnail/:id', async (req, res) => {
   try {
     const upstream = await axios.get(
       `https://i.ytimg.com/vi/${req.params.id}/hqdefault.jpg`,
-      { responseType: 'stream', timeout: 10000, maxRedirects: 2 }
+      { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 }
     );
     res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=86400');
-    upstream.data.on('error', () => res.destroy());
-    upstream.data.pipe(res);
+    res.send(Buffer.from(upstream.data));
   } catch {
     if (!res.headersSent) res.status(502).send('Thumbnail unavailable.');
   }
@@ -662,11 +694,11 @@ app.get('/api/channel-avatar/:id', async (req, res) => {
       if (!imageUrl) return res.status(404).send('Avatar unavailable.');
       channelAvatarCache.set(channelId, imageUrl);
     }
-    const upstream = await axios.get(imageUrl, { responseType: 'stream', timeout: 10000, maxRedirects: 3 });
+    const upstream = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 });
+    if (!String(upstream.headers['content-type'] || '').startsWith('image/')) return res.status(502).send('Invalid image response.');
     res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
     res.setHeader('Cache-Control', 'private, max-age=604800');
-    upstream.data.on('error', () => res.destroy());
-    upstream.data.pipe(res);
+    res.send(Buffer.from(upstream.data));
   } catch {
     if (!res.headersSent) res.status(502).send('Avatar unavailable.');
   }
@@ -686,10 +718,17 @@ const QUALITY_FORMATS = {
   audio: 'bestaudio'
 };
 
-app.post('/api/download', (req, res) => {
+app.post('/api/download', expensiveLimiter, (req, res) => {
   const { url, quality, video } = req.body || {};
   if (!url || !isValidYoutubeUrl(url)) {
     return res.status(400).json({ error: 'That does not look like a valid YouTube URL.' });
+  }
+  if (!Object.prototype.hasOwnProperty.call(QUALITY_FORMATS, quality)) {
+    return res.status(400).json({ error: 'Invalid download quality.' });
+  }
+  const activeDownloads = Object.values(jobs).filter((job) => job.status === 'processing').length;
+  if (activeDownloads >= MAX_ACTIVE_DOWNLOADS) {
+    return res.status(429).json({ error: 'Six downloads are already active. Let one finish first.' });
   }
 
   const format = QUALITY_FORMATS[quality] || QUALITY_FORMATS.best;
@@ -703,7 +742,7 @@ app.post('/api/download', (req, res) => {
   const args = audioOnly
     ? [
         '-f', format,
-        '-x', '--audio-format', 'mp3',
+        '-x', '--audio-format', 'best',
         '--no-playlist',
         '--newline',
         '--extractor-args', 'youtube:player_client=default,tv_simply',
@@ -821,5 +860,5 @@ if (fs.existsSync(CLIENT_DIST)) {
 }
 
 app.listen(PORT, () => {
-  console.log(`ytgrab listening on http://127.0.0.1:${PORT}`);
+  console.log(`ytgrab listening on port ${PORT}`);
 });
