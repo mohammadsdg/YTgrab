@@ -33,7 +33,7 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
-const STREAM_CACHE_VERSION = 'v2';
+const STREAM_CACHE_VERSION = 'v3';
 
 // Signed download tokens: let tools like aria2/wget/curl (which don't carry
 // browser cookies) fetch a specific file without logging in, as long as
@@ -466,6 +466,7 @@ app.post('/api/stream/:id/prepare', (req, res) => {
   const videoId = req.params.id;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
   const finalFile = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}.mp4`);
+  const buildingFile = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}-building.mp4`);
   if (fs.existsSync(finalFile)) {
     console.log(`[stream:${videoId}] cache hit`);
     return res.json({ status: 'done', url: `/api/stream/${videoId}` });
@@ -511,12 +512,13 @@ app.post('/api/stream/:id/prepare', (req, res) => {
     const sourceFile = path.join(STREAM_DIR, source);
     console.log(`[stream:${videoId}] download complete; converting with ffmpeg`);
     streamJobs[videoId] = { status: 'converting', progress: 100 };
+    if (fs.existsSync(buildingFile)) fs.unlinkSync(buildingFile);
     const converter = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
       '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.0', '-tag:v', 'avc1',
       '-c:a', 'aac', '-b:a', '160k',
-      '-movflags', '+faststart', finalFile
+      '-movflags', '+faststart', buildingFile
     ]);
     let convertError = '';
     converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
@@ -526,11 +528,13 @@ app.post('/api/stream/:id/prepare', (req, res) => {
     });
     converter.on('close', (convertCode) => {
       fs.unlink(sourceFile, () => {});
-      if (convertCode !== 0 || !fs.existsSync(finalFile)) {
+      if (convertCode !== 0 || !fs.existsSync(buildingFile)) {
+        fs.unlink(buildingFile, () => {});
         console.error(`[stream:${videoId}] ffmpeg failed (${convertCode}): ${convertError.slice(-1200)}`);
         streamJobs[videoId] = { status: 'error', error: convertError.slice(-800) || 'Could not create a browser-compatible video.' };
         return;
       }
+      fs.renameSync(buildingFile, finalFile);
       console.log(`[stream:${videoId}] ready: ${path.basename(finalFile)} (${fs.statSync(finalFile).size} bytes)`);
       streamJobs[videoId] = { status: 'done', url: `/api/stream/${videoId}` };
     });
@@ -541,6 +545,9 @@ app.post('/api/stream/:id/prepare', (req, res) => {
 app.get('/api/stream/:id/status', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
   const finalFile = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}.mp4`);
+  if (streamJobs[req.params.id] && streamJobs[req.params.id].status !== 'done') {
+    return res.json(streamJobs[req.params.id]);
+  }
   if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${req.params.id}` });
   res.json(streamJobs[req.params.id] || { status: 'idle' });
 });

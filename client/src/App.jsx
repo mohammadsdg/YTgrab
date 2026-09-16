@@ -351,7 +351,7 @@ export default function App({ mode, setMode }) {
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
       {player && <>
         {playerStatus?.id === player.id && playerStatus.status === 'done'
-          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=2`} controls autoPlay playsInline onError={(event) => {
+          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=3`} controls autoPlay playsInline onError={(event) => {
               const mediaError = event.currentTarget.error;
               const detail = mediaError?.message || `media error code ${mediaError?.code || 'unknown'}`;
               setNotice(`Playback failed: ${detail}`);
