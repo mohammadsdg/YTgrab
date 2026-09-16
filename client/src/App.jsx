@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert, Avatar, Box, Button, Chip, CircularProgress, Dialog, DialogContent,
   IconButton, InputAdornment, Paper, Snackbar, Stack, Switch, TextField, Typography
@@ -48,6 +48,55 @@ function videoIdFromInput(value) {
     }
   } catch { /* search text */ }
   return null;
+}
+
+function HlsPlayer({ src, onError }) {
+  const videoRef = useRef(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src) return undefined;
+    let hls;
+    let cancelled = false;
+
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src;
+      video.play().catch(() => {});
+      return () => { video.removeAttribute('src'); video.load(); };
+    }
+
+    import('hls.js').then(({ default: Hls }) => {
+      if (cancelled) return;
+      if (!Hls.isSupported()) {
+        onError('HLS playback is not supported by this browser.');
+        return;
+      }
+      hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data.fatal) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hls.startLoad();
+        } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        } else {
+          onError(`${data.type}: ${data.details}`);
+          hls.destroy();
+        }
+      });
+    }).catch((error) => onError(error.message));
+    return () => {
+      cancelled = true;
+      if (hls) hls.destroy();
+    };
+  }, [src]);
+
+  return <video ref={videoRef} className="video-player" controls playsInline onError={(event) => {
+    const mediaError = event.currentTarget.error;
+    if (mediaError) onError(mediaError.message || `media error code ${mediaError.code}`);
+  }} />;
 }
 
 function Login({ onLogin }) {
@@ -351,11 +400,7 @@ export default function App({ mode, setMode }) {
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
       {player && <>
         {playerStatus?.id === player.id && playerStatus.status === 'done'
-          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=3`} controls autoPlay playsInline onError={(event) => {
-              const mediaError = event.currentTarget.error;
-              const detail = mediaError?.message || `media error code ${mediaError?.code || 'unknown'}`;
-              setNotice(`Playback failed: ${detail}`);
-            }} />
+          ? <HlsPlayer src={`${playerStatus.url}?v=1`} onError={(detail) => setNotice(`Playback failed: ${detail}`)} />
           : <Box className="player-preparing">
               {playerStatus?.status !== 'error' && <CircularProgress />}
               <Typography fontWeight={700}>{playerStatus?.status === 'converting' ? 'Making it browser-friendly…' : playerStatus?.status === 'error' ? 'Could not prepare this video' : `Preparing video${playerStatus?.progress ? ` · ${Math.round(playerStatus.progress)}%` : '…'}`}</Typography>

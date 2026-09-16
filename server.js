@@ -33,7 +33,7 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
-const STREAM_CACHE_VERSION = 'v3';
+const STREAM_CACHE_VERSION = 'hls-v1';
 
 // Signed download tokens: let tools like aria2/wget/curl (which don't carry
 // browser cookies) fetch a specific file without logging in, as long as
@@ -465,11 +465,12 @@ app.post('/api/history', (req, res) => {
 app.post('/api/stream/:id/prepare', (req, res) => {
   const videoId = req.params.id;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const finalFile = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}.mp4`);
-  const buildingFile = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}-building.mp4`);
-  if (fs.existsSync(finalFile)) {
+  const finalDir = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}`);
+  const playlistFile = path.join(finalDir, 'index.m3u8');
+  const buildingDir = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}-building`);
+  if (fs.existsSync(playlistFile)) {
     console.log(`[stream:${videoId}] cache hit`);
-    return res.json({ status: 'done', url: `/api/stream/${videoId}` });
+    return res.json({ status: 'done', url: `/api/hls/${videoId}/index.m3u8` });
   }
   if (streamJobs[videoId]?.status !== 'error') {
     if (streamJobs[videoId]) return res.json(streamJobs[videoId]);
@@ -510,15 +511,21 @@ app.post('/api/stream/:id/prepare', (req, res) => {
       return;
     }
     const sourceFile = path.join(STREAM_DIR, source);
-    console.log(`[stream:${videoId}] download complete; converting with ffmpeg`);
+    console.log(`[stream:${videoId}] download complete; creating HLS stream`);
     streamJobs[videoId] = { status: 'converting', progress: 100 };
-    if (fs.existsSync(buildingFile)) fs.unlinkSync(buildingFile);
+    if (fs.existsSync(buildingDir)) fs.rmSync(buildingDir, { recursive: true });
+    fs.mkdirSync(buildingDir);
+    const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
+    const segmentTemplate = path.join(buildingDir, 'segment-%05d.ts');
     const converter = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
       '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.0', '-tag:v', 'avc1',
+      '-force_key_frames', 'expr:gte(t,n_forced*6)',
       '-c:a', 'aac', '-b:a', '160k',
-      '-movflags', '+faststart', buildingFile
+      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod',
+      '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
+      buildingPlaylist
     ]);
     let convertError = '';
     converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
@@ -528,15 +535,17 @@ app.post('/api/stream/:id/prepare', (req, res) => {
     });
     converter.on('close', (convertCode) => {
       fs.unlink(sourceFile, () => {});
-      if (convertCode !== 0 || !fs.existsSync(buildingFile)) {
-        fs.unlink(buildingFile, () => {});
+      if (convertCode !== 0 || !fs.existsSync(buildingPlaylist)) {
+        fs.rm(buildingDir, { recursive: true, force: true }, () => {});
         console.error(`[stream:${videoId}] ffmpeg failed (${convertCode}): ${convertError.slice(-1200)}`);
-        streamJobs[videoId] = { status: 'error', error: convertError.slice(-800) || 'Could not create a browser-compatible video.' };
+        streamJobs[videoId] = { status: 'error', error: convertError.slice(-800) || 'Could not create the HLS stream.' };
         return;
       }
-      fs.renameSync(buildingFile, finalFile);
-      console.log(`[stream:${videoId}] ready: ${path.basename(finalFile)} (${fs.statSync(finalFile).size} bytes)`);
-      streamJobs[videoId] = { status: 'done', url: `/api/stream/${videoId}` };
+      if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true });
+      fs.renameSync(buildingDir, finalDir);
+      const segmentCount = fs.readdirSync(finalDir).filter((name) => name.endsWith('.ts')).length;
+      console.log(`[stream:${videoId}] HLS ready: ${segmentCount} segments`);
+      streamJobs[videoId] = { status: 'done', url: `/api/hls/${videoId}/index.m3u8` };
     });
   });
   res.status(202).json(streamJobs[videoId]);
@@ -544,20 +553,22 @@ app.post('/api/stream/:id/prepare', (req, res) => {
 
 app.get('/api/stream/:id/status', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const finalFile = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}.mp4`);
+  const playlistFile = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
   if (streamJobs[req.params.id] && streamJobs[req.params.id].status !== 'done') {
     return res.json(streamJobs[req.params.id]);
   }
-  if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${req.params.id}` });
+  if (fs.existsSync(playlistFile)) return res.json({ status: 'done', url: `/api/hls/${req.params.id}/index.m3u8` });
   res.json(streamJobs[req.params.id] || { status: 'idle' });
 });
 
-app.get('/api/stream/:id', (req, res) => {
+app.get('/api/hls/:id/:file', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  const file = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}.mp4`);
-  if (!fs.existsSync(file)) return res.status(404).json({ error: 'Video is not prepared yet.' });
+  if (!/^(index\.m3u8|segment-\d{5}\.ts)$/.test(req.params.file)) return res.status(400).send('Invalid stream file.');
+  const file = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`, req.params.file);
+  if (!fs.existsSync(file)) return res.status(404).send('Stream file not found.');
   res.setHeader('Cache-Control', 'private, max-age=86400');
-  res.type('video/mp4').sendFile(file);
+  res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
+  res.sendFile(file);
 });
 
 app.get('/api/image', async (req, res) => {
