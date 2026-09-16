@@ -33,6 +33,7 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
+const STREAM_CACHE_VERSION = 'v2';
 
 // Signed download tokens: let tools like aria2/wget/curl (which don't carry
 // browser cookies) fetch a specific file without logging in, as long as
@@ -464,10 +465,18 @@ app.post('/api/history', (req, res) => {
 app.post('/api/stream/:id/prepare', (req, res) => {
   const videoId = req.params.id;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const finalFile = path.join(STREAM_DIR, `${videoId}.mp4`);
-  if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${videoId}` });
-  if (streamJobs[videoId]) return res.json(streamJobs[videoId]);
+  const finalFile = path.join(STREAM_DIR, `${videoId}-${STREAM_CACHE_VERSION}.mp4`);
+  if (fs.existsSync(finalFile)) {
+    console.log(`[stream:${videoId}] cache hit`);
+    return res.json({ status: 'done', url: `/api/stream/${videoId}` });
+  }
+  if (streamJobs[videoId]?.status !== 'error') {
+    if (streamJobs[videoId]) return res.json(streamJobs[videoId]);
+  } else {
+    delete streamJobs[videoId];
+  }
 
+  console.log(`[stream:${videoId}] preparing browser-compatible video`);
   streamJobs[videoId] = { status: 'downloading', progress: 0 };
   const sourceTemplate = path.join(STREAM_DIR, `${videoId}-source.%(ext)s`);
   const downloader = spawn('yt-dlp', [
@@ -485,10 +494,12 @@ app.post('/api/stream/:id/prepare', (req, res) => {
   });
   downloader.stderr.on('data', (chunk) => { downloadError += chunk.toString(); });
   downloader.on('error', (error) => {
+    console.error(`[stream:${videoId}] yt-dlp could not start: ${error.message}`);
     streamJobs[videoId] = { status: 'error', error: `Could not start yt-dlp: ${error.message}` };
   });
   downloader.on('close', (code) => {
     if (code !== 0) {
+      console.error(`[stream:${videoId}] yt-dlp failed (${code}): ${downloadError.slice(-1200)}`);
       streamJobs[videoId] = { status: 'error', error: downloadError.slice(-800) || 'Could not prepare the video.' };
       return;
     }
@@ -498,24 +509,29 @@ app.post('/api/stream/:id/prepare', (req, res) => {
       return;
     }
     const sourceFile = path.join(STREAM_DIR, source);
+    console.log(`[stream:${videoId}] download complete; converting with ffmpeg`);
     streamJobs[videoId] = { status: 'converting', progress: 100 };
     const converter = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
       '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+      '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.0', '-tag:v', 'avc1',
       '-c:a', 'aac', '-b:a', '160k',
       '-movflags', '+faststart', finalFile
     ]);
     let convertError = '';
     converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
     converter.on('error', (error) => {
+      console.error(`[stream:${videoId}] ffmpeg could not start: ${error.message}`);
       streamJobs[videoId] = { status: 'error', error: `Could not start ffmpeg: ${error.message}` };
     });
     converter.on('close', (convertCode) => {
       fs.unlink(sourceFile, () => {});
       if (convertCode !== 0 || !fs.existsSync(finalFile)) {
+        console.error(`[stream:${videoId}] ffmpeg failed (${convertCode}): ${convertError.slice(-1200)}`);
         streamJobs[videoId] = { status: 'error', error: convertError.slice(-800) || 'Could not create a browser-compatible video.' };
         return;
       }
+      console.log(`[stream:${videoId}] ready: ${path.basename(finalFile)} (${fs.statSync(finalFile).size} bytes)`);
       streamJobs[videoId] = { status: 'done', url: `/api/stream/${videoId}` };
     });
   });
@@ -524,14 +540,14 @@ app.post('/api/stream/:id/prepare', (req, res) => {
 
 app.get('/api/stream/:id/status', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const finalFile = path.join(STREAM_DIR, `${req.params.id}.mp4`);
+  const finalFile = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}.mp4`);
   if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${req.params.id}` });
   res.json(streamJobs[req.params.id] || { status: 'idle' });
 });
 
 app.get('/api/stream/:id', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  const file = path.join(STREAM_DIR, `${req.params.id}.mp4`);
+  const file = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}.mp4`);
   if (!fs.existsSync(file)) return res.status(404).json({ error: 'Video is not prepared yet.' });
   res.setHeader('Cache-Control', 'private, max-age=86400');
   res.type('video/mp4').sendFile(file);

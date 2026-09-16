@@ -267,16 +267,18 @@ export default function App({ mode, setMode }) {
         {channelBusy || !channelPage.channel ? <Box className="channel-loading"><CircularProgress /></Box> : <>
           {channelPage.channel.banner && <img className="channel-banner" src={channelPage.channel.banner} alt="" />}
           <Box className="channel-header" dir={textDirection(channelPage.channel.name)}>
-            <Avatar className="channel-avatar" src={channelPage.channel.avatar || undefined}>{channelPage.channel.name[0]}</Avatar>
-            <Box className="channel-heading">
-              <Typography variant="h4" fontWeight={700} dir={textDirection(channelPage.channel.name)}>{channelPage.channel.name}</Typography>
-              {channelPage.channel.handle && <Typography dir="ltr" color="text.secondary">{channelPage.channel.handle}</Typography>}
-              <Typography color="text.secondary">{channelPage.channel.followers ? `${channelPage.channel.followers.toLocaleString()} followers · ` : ''}{channelPage.videos.length} recent videos</Typography>
-              {channelPage.channel.description && <Typography dir={textDirection(channelPage.channel.description)} className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
+            <Box className="channel-identity">
+              <Avatar className="channel-avatar" src={channelPage.channel.avatar || undefined}>{channelPage.channel.name[0]}</Avatar>
+              <Box className="channel-heading">
+                <Typography variant="h4" fontWeight={700} dir={textDirection(channelPage.channel.name)}>{channelPage.channel.name}</Typography>
+                {channelPage.channel.handle && <Typography dir="ltr" color="text.secondary">{channelPage.channel.handle}</Typography>}
+                <Typography color="text.secondary">{channelPage.channel.followers ? `${channelPage.channel.followers.toLocaleString()} followers · ` : ''}{channelPage.videos.length} recent videos</Typography>
+              </Box>
             </Box>
             <Button variant={subscriptions.some((item) => item.id === channelPage.channel.id) ? 'outlined' : 'contained'} onClick={() => toggleFollow({ channelId: channelPage.channel.id, channel: channelPage.channel.name })}>
               {subscriptions.some((item) => item.id === channelPage.channel.id) ? 'Following' : 'Follow'}
             </Button>
+            {channelPage.channel.description && <Typography dir={textDirection(channelPage.channel.description)} className="channel-description" color="text.secondary">{channelPage.channel.description}</Typography>}
           </Box>
           <Typography className="section-title">Videos</Typography>
           <Box className="video-grid">{channelPage.videos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={setDownloadVideo} onChannel={openChannel} />)}</Box>
@@ -349,7 +351,11 @@ export default function App({ mode, setMode }) {
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
       {player && <>
         {playerStatus?.id === player.id && playerStatus.status === 'done'
-          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=1`} controls autoPlay playsInline onError={() => setNotice('The prepared video could not be played. Check the server log.')} />
+          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=2`} controls autoPlay playsInline onError={(event) => {
+              const mediaError = event.currentTarget.error;
+              const detail = mediaError?.message || `media error code ${mediaError?.code || 'unknown'}`;
+              setNotice(`Playback failed: ${detail}`);
+            }} />
           : <Box className="player-preparing">
               {playerStatus?.status !== 'error' && <CircularProgress />}
               <Typography fontWeight={700}>{playerStatus?.status === 'converting' ? 'Making it browser-friendly…' : playerStatus?.status === 'error' ? 'Could not prepare this video' : `Preparing video${playerStatus?.progress ? ` · ${Math.round(playerStatus.progress)}%` : '…'}`}</Typography>
