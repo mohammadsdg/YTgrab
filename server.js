@@ -10,6 +10,7 @@ const app = express();
 const PORT = Number(process.env.PORT);
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 const DATA_DIR = path.join(__dirname, 'data');
+const STREAM_DIR = path.join(DATA_DIR, 'streams');
 const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const CUSTOM_BACKGROUND_FILE = path.join(DATA_DIR, 'background.webp');
@@ -41,6 +42,7 @@ const FILE_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+if (!fs.existsSync(STREAM_DIR)) fs.mkdirSync(STREAM_DIR);
 
 function readJsonFile(file, fallback) {
   try {
@@ -223,6 +225,7 @@ app.get('/files/:name', (req, res) => {
 
 // in-memory job tracking: { [id]: { status, filename, error, progress } }
 const jobs = {};
+const streamJobs = {};
 
 function isValidYoutubeUrl(url) {
   try {
@@ -458,39 +461,80 @@ app.post('/api/history', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/stream/:id', async (req, res) => {
-  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  const proc = spawn('yt-dlp', [
-    '--no-playlist', '--no-warnings',
-    '-f', 'best[height<=720][ext=mp4]/best[ext=mp4]/best[height<=720]/best',
+app.post('/api/stream/:id/prepare', (req, res) => {
+  const videoId = req.params.id;
+  if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
+  const finalFile = path.join(STREAM_DIR, `${videoId}.mp4`);
+  if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${videoId}` });
+  if (streamJobs[videoId]) return res.json(streamJobs[videoId]);
+
+  streamJobs[videoId] = { status: 'downloading', progress: 0 };
+  const sourceTemplate = path.join(STREAM_DIR, `${videoId}-source.%(ext)s`);
+  const downloader = spawn('yt-dlp', [
+    '--no-playlist', '--newline',
+    '-f', 'bv*[height<=720]+ba/b[height<=720]/b',
+    '--merge-output-format', 'mkv',
     '--extractor-args', 'youtube:player_client=default,tv_simply',
-    '-o', '-',
-    `https://www.youtube.com/watch?v=${req.params.id}`
+    '-o', sourceTemplate,
+    `https://www.youtube.com/watch?v=${videoId}`
   ]);
-  let stderr = '';
-  let started = false;
-  res.status(200);
-  res.setHeader('Content-Type', 'video/mp4');
-  res.setHeader('Cache-Control', 'no-store');
-  proc.stdout.once('data', (chunk) => {
-    started = true;
-    res.write(chunk);
-    proc.stdout.pipe(res);
+  let downloadError = '';
+  downloader.stdout.on('data', (chunk) => {
+    const match = chunk.toString().match(/(\d+(?:\.\d+)?)%/);
+    if (match) streamJobs[videoId] = { status: 'downloading', progress: Number(match[1]) };
   });
-  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-  proc.on('error', (error) => {
-    if (!res.headersSent) res.status(500).json({ error: error.message });
-    else res.destroy(error);
+  downloader.stderr.on('data', (chunk) => { downloadError += chunk.toString(); });
+  downloader.on('error', (error) => {
+    streamJobs[videoId] = { status: 'error', error: `Could not start yt-dlp: ${error.message}` };
   });
-  proc.on('close', (code) => {
-    if (!started && !res.writableEnded) {
-      if (!res.headersSent) res.status(502);
-      res.end(stderr.slice(-800) || `yt-dlp exited with code ${code}`);
+  downloader.on('close', (code) => {
+    if (code !== 0) {
+      streamJobs[videoId] = { status: 'error', error: downloadError.slice(-800) || 'Could not prepare the video.' };
+      return;
     }
+    const source = fs.readdirSync(STREAM_DIR).find((name) => name.startsWith(`${videoId}-source.`) && !name.endsWith('.part'));
+    if (!source) {
+      streamJobs[videoId] = { status: 'error', error: 'Downloaded media file was not found.' };
+      return;
+    }
+    const sourceFile = path.join(STREAM_DIR, source);
+    streamJobs[videoId] = { status: 'converting', progress: 100 };
+    const converter = spawn('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart', finalFile
+    ]);
+    let convertError = '';
+    converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
+    converter.on('error', (error) => {
+      streamJobs[videoId] = { status: 'error', error: `Could not start ffmpeg: ${error.message}` };
+    });
+    converter.on('close', (convertCode) => {
+      fs.unlink(sourceFile, () => {});
+      if (convertCode !== 0 || !fs.existsSync(finalFile)) {
+        streamJobs[videoId] = { status: 'error', error: convertError.slice(-800) || 'Could not create a browser-compatible video.' };
+        return;
+      }
+      streamJobs[videoId] = { status: 'done', url: `/api/stream/${videoId}` };
+    });
   });
-  res.on('close', () => {
-    if (!proc.killed) proc.kill('SIGKILL');
-  });
+  res.status(202).json(streamJobs[videoId]);
+});
+
+app.get('/api/stream/:id/status', (req, res) => {
+  if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
+  const finalFile = path.join(STREAM_DIR, `${req.params.id}.mp4`);
+  if (fs.existsSync(finalFile)) return res.json({ status: 'done', url: `/api/stream/${req.params.id}` });
+  res.json(streamJobs[req.params.id] || { status: 'idle' });
+});
+
+app.get('/api/stream/:id', (req, res) => {
+  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
+  const file = path.join(STREAM_DIR, `${req.params.id}.mp4`);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: 'Video is not prepared yet.' });
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.type('video/mp4').sendFile(file);
 });
 
 app.get('/api/image', async (req, res) => {

@@ -119,6 +119,7 @@ export default function App({ mode, setMode }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [player, setPlayer] = useState(null);
+  const [playerStatus, setPlayerStatus] = useState(null);
   const [downloadVideo, setDownloadVideo] = useState(null);
   const [downloadState, setDownloadState] = useState(null);
   const [channelPage, setChannelPage] = useState(null);
@@ -166,9 +167,30 @@ export default function App({ mode, setMode }) {
     } catch (err) { setNotice(err.message); }
   };
 
+  const pollStream = (videoId) => {
+    const check = async () => {
+      try {
+        const state = await api(`/api/stream/${videoId}/status`);
+        setPlayerStatus({ id: videoId, ...state });
+        if (!['done', 'error'].includes(state.status)) setTimeout(check, 1500);
+      } catch (error) {
+        setPlayerStatus({ id: videoId, status: 'error', error: error.message });
+      }
+    };
+    setTimeout(check, 800);
+  };
+
   const play = async (video) => {
     setPlayer(video);
+    setPlayerStatus({ id: video.id, status: 'starting', progress: 0 });
     api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
+    try {
+      const state = await api(`/api/stream/${video.id}/prepare`, { method: 'POST' });
+      setPlayerStatus({ id: video.id, ...state });
+      if (!['done', 'error'].includes(state.status)) pollStream(video.id);
+    } catch (error) {
+      setPlayerStatus({ id: video.id, status: 'error', error: error.message });
+    }
   };
 
   const openChannel = async (channelId) => {
@@ -325,7 +347,16 @@ export default function App({ mode, setMode }) {
 
     <Dialog open={Boolean(player)} onClose={() => setPlayer(null)} fullWidth maxWidth="md" PaperProps={{ className: 'player-dialog' }}>
       <IconButton className="dialog-close" onClick={() => setPlayer(null)}><CloseRounded /></IconButton>
-      {player && <><Box component="video" className="video-player" src={`/api/stream/${player.id}`} controls autoPlay playsInline onError={() => setNotice('This video could not be streamed. Check the server log for the yt-dlp error.')} /><DialogContent><Typography variant="h6" fontWeight={800} dir={textDirection(player.title)}>{player.title}</Typography><Typography color="text.secondary" dir={textDirection(player.channel)}>{player.channel}</Typography></DialogContent></>}
+      {player && <>
+        {playerStatus?.id === player.id && playerStatus.status === 'done'
+          ? <Box component="video" className="video-player" src={`${playerStatus.url}?v=1`} controls autoPlay playsInline onError={() => setNotice('The prepared video could not be played. Check the server log.')} />
+          : <Box className="player-preparing">
+              {playerStatus?.status !== 'error' && <CircularProgress />}
+              <Typography fontWeight={700}>{playerStatus?.status === 'converting' ? 'Making it browser-friendly…' : playerStatus?.status === 'error' ? 'Could not prepare this video' : `Preparing video${playerStatus?.progress ? ` · ${Math.round(playerStatus.progress)}%` : '…'}`}</Typography>
+              {playerStatus?.error && <Typography color="error" variant="body2">{playerStatus.error}</Typography>}
+            </Box>}
+        <DialogContent><Typography variant="h6" fontWeight={800} dir={textDirection(player.title)}>{player.title}</Typography><Typography color="text.secondary" dir={textDirection(player.channel)}>{player.channel}</Typography></DialogContent>
+      </>}
     </Dialog>
 
     <Dialog open={Boolean(downloadVideo)} onClose={() => { setDownloadVideo(null); setDownloadState(null); }} fullWidth maxWidth="xs" PaperProps={{ className: 'download-dialog' }}>

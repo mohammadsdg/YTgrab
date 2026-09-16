@@ -29,9 +29,9 @@ button, input { font: inherit; }
 .login-mark { width: 112px; height: 112px; object-fit: contain; align-self: center; filter: drop-shadow(0 14px 25px rgba(122,42,213,.24)); }
 .login-heading { text-align: center; margin: -8px 0 6px; }
 .brand-mark { width: 48px; height: 48px; object-fit: contain; }
-.brand-mark.small { width: 42px; height: 42px; }
+.brand-mark.small { width: 58px; height: 58px; }
 .app-shell { min-height: 100vh; padding-bottom: 100px; }
-.topbar { height: 72px; padding: 12px max(24px,calc((100vw - 1280px)/2)); display: flex; align-items: center; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 10; }
+.topbar { height: 88px; padding: 12px max(24px,calc((100vw - 1280px)/2)); display: flex; align-items: center; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 10; }
 .main-content { width: min(1280px,calc(100% - 48px)); margin: 0 auto; padding-top: 32px; }
 .page-heading { margin-bottom: 26px; }
 .page-heading h4, .search-hero h4, .main-content > h4, .channel-heading h4 { letter-spacing: -.03em; }
@@ -77,13 +77,15 @@ button, input { font: inherit; }
 .mobile-dock button.active { color: var(--text); background: var(--surface-2); }
 .player-dialog, .download-dialog { border: 1px solid var(--line); border-radius: 14px !important; overflow: hidden; background: var(--surface) !important; }
 .video-player { width: 100%; display: block; aspect-ratio: 16/9; background: #000; }
+.player-preparing { width: 100%; min-height: 360px; padding: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; background: #08080a; }
 .dialog-close { position: absolute !important; z-index: 2; top: 8px; right: 8px; color: #fff !important; background: rgba(0,0,0,.55) !important; }
 
 @media (max-width: 1050px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media (max-width: 760px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media (max-width: 560px) {
   .app-shell { padding-bottom: 94px; }
-  .topbar { height: 64px; padding: 10px 15px; }
+  .topbar { height: 76px; padding: 9px 15px; }
+  .brand-mark.small { width: 54px; height: 54px; }
   .main-content { width: calc(100% - 28px); padding-top: 22px; }
   .video-grid,.video-grid.compact { grid-template-columns: 1fr; gap: 22px; }
   .video-card { display: grid; grid-template-columns: 43% minmax(0,1fr); gap: 11px; }
