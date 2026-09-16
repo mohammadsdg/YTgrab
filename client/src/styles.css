@@ -31,7 +31,8 @@ button, input { font: inherit; }
 .brand-mark { width: 48px; height: 48px; object-fit: contain; }
 .brand-mark.small { width: 58px; height: 58px; }
 .app-shell { min-height: 100vh; padding-bottom: 100px; }
-.topbar { height: 88px; padding: 12px max(24px,calc((100vw - 1280px)/2)); display: flex; align-items: center; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 10; }
+.topbar { height: 88px; padding: 12px max(24px,calc((100vw - 1280px)/2)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 10; }
+.github-button { color: var(--text) !important; }
 .main-content { width: min(1280px,calc(100% - 48px)); margin: 0 auto; padding-top: 32px; }
 .page-heading { margin-bottom: 26px; }
 .page-heading h4, .search-hero h4, .main-content > h4, .channel-heading h4 { letter-spacing: -.03em; }
@@ -58,8 +59,21 @@ button, input { font: inherit; }
 .big-search .MuiOutlinedInput-root { min-height: 58px; border-radius: 12px; background: var(--surface); }
 .big-search fieldset { border-color: var(--line) !important; }
 .section-title { margin: 30px 0 14px !important; font-size: 17px !important; font-weight: 700 !important; }
-.channel-strip { overflow-x: auto; padding: 3px 0 8px; }
-.file-item, .settings-card { padding: 17px 18px; border: 1px solid var(--line); border-radius: 11px !important; display: flex; align-items: center; justify-content: space-between; gap: 15px; background: var(--surface) !important; }
+.subscription-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(112px,1fr)); gap: 10px; }
+.subscription-card { padding: 16px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); display: flex; flex-direction: column; align-items: center; gap: 9px; cursor: pointer; }
+.subscription-card:hover { background: var(--surface-2); }
+.subscription-card .MuiAvatar-root { width: 62px; height: 62px; }
+.subscription-card span { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.history-toggle { width: 100%; margin: 34px 0 18px; padding: 16px 4px; display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: start; cursor: pointer; font-weight: 700; }
+.history-toggle span:nth-child(2) { color: var(--muted); font-size: 12px; font-weight: 500; }
+.history-toggle svg { transition: transform .2s; }
+.history-toggle.open svg { transform: rotate(180deg); }
+.downloads-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.file-item, .settings-card { padding: 12px; border: 1px solid var(--line); border-radius: 11px !important; display: flex; align-items: center; gap: 13px; background: var(--surface) !important; }
+.file-item > img, .file-placeholder { width: 116px; aspect-ratio: 16/9; flex: 0 0 auto; object-fit: cover; border-radius: 7px; background: var(--surface-2); }
+.file-placeholder { display: grid; place-items: center; color: var(--muted); }
+.file-copy { min-width: 0; flex: 1; }
+.file-actions { display: flex; flex-direction: column; }
 .settings-card { max-width: 680px; margin-bottom: 12px; }
 .telegram-orb { width: 42px; height: 42px; flex: 0 0 auto; border-radius: 50%; display: grid; place-items: center; color: #fff; background: #279ed8; transform: rotate(-12deg); }
 .channel-banner { width: 100%; max-height: 260px; aspect-ratio: 6/1; object-fit: cover; display: block; border-radius: 12px 12px 0 0; background: var(--surface-2); }
@@ -82,6 +96,7 @@ button, input { font: inherit; }
 .player-dialog { --plyr-color-main: var(--accent); }
 .player-preparing { width: 100%; min-height: 360px; padding: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; background: #08080a; }
 .dialog-close { position: absolute !important; z-index: 2; top: 8px; right: 8px; color: #fff !important; background: rgba(0,0,0,.55) !important; }
+.load-more-sentinel { min-height: 72px; display: grid; place-items: center; }
 
 @media (max-width: 1050px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(3,minmax(0,1fr)); } }
 @media (max-width: 760px) { .video-grid,.video-grid.compact { grid-template-columns: repeat(2,minmax(0,1fr)); } }
@@ -109,4 +124,8 @@ button, input { font: inherit; }
   .channel-header > button { width: 100%; min-height: 42px; }
   .channel-description { grid-column: 1; font-size: 13px !important; line-height: 1.75 !important; max-height: 180px; overflow-y: auto; }
   .settings-card { flex-wrap: wrap; }
+  .subscription-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .subscription-card .MuiAvatar-root { width: 54px; height: 54px; }
+  .downloads-grid { grid-template-columns: 1fr; }
+  .file-item > img, .file-placeholder { width: 104px; }
 }

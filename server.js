@@ -13,6 +13,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const STREAM_DIR = path.join(DATA_DIR, 'streams');
 const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const DOWNLOAD_METADATA_FILE = path.join(DATA_DIR, 'downloads.json');
 const CUSTOM_BACKGROUND_FILE = path.join(DATA_DIR, 'background.webp');
 const DEFAULT_BACKGROUND_FILE = path.join(__dirname, 'client', 'public', 'mountains.webp');
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
@@ -33,6 +34,7 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
+const channelAvatarCache = new Map();
 const STREAM_CACHE_VERSION = 'hls-v3';
 const STREAM_QUALITIES = new Set(['360', '480', '720']);
 
@@ -286,7 +288,9 @@ app.get('/api/search', (req, res) => {
     return res.status(400).json({ error: 'Search must be between 1 and 200 characters.' });
   }
 
-  const cacheKey = query.toLocaleLowerCase();
+  const page = Math.max(1, Math.min(25, Number.parseInt(req.query.page, 10) || 1));
+  const requestedCount = page * SEARCH_LIMIT;
+  const cacheKey = `${query.toLocaleLowerCase()}:${page}`;
   const cached = searchCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) return res.json({ results: cached.results });
 
@@ -295,7 +299,7 @@ app.get('/api/search', (req, res) => {
     '--dump-single-json',
     '--no-warnings',
     '--extractor-args', 'youtube:player_client=default,tv_simply',
-    `ytsearch${SEARCH_LIMIT}:${query}`
+    `ytsearch${requestedCount}:${query}`
   ];
   const proc = spawn('yt-dlp', args);
   let stdout = '';
@@ -324,7 +328,7 @@ app.get('/api/search', (req, res) => {
     }
     try {
       const data = JSON.parse(stdout);
-      const results = (Array.isArray(data.entries) ? data.entries : [])
+      const allResults = (Array.isArray(data.entries) ? data.entries : [])
         .filter((entry) => entry && isValidVideoId(entry.id))
         .map((entry) => ({
           id: entry.id,
@@ -333,10 +337,12 @@ app.get('/api/search', (req, res) => {
           channelId: entry.channel_id || entry.uploader_id || '',
           duration: Number.isFinite(entry.duration) ? entry.duration : null,
           url: `https://www.youtube.com/watch?v=${entry.id}`,
-          thumbnail: `/api/thumbnail/${entry.id}`
+          thumbnail: `/api/thumbnail/${entry.id}`,
+          channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : ''
         }));
+      const results = allResults.slice((page - 1) * SEARCH_LIMIT, page * SEARCH_LIMIT);
       searchCache.set(cacheKey, { results, expires: Date.now() + SEARCH_CACHE_TTL_MS });
-      res.json({ results });
+      res.json({ results, page, hasMore: results.length === SEARCH_LIMIT });
     } catch {
       res.status(502).json({ error: 'YouTube returned an unreadable search response.' });
     }
@@ -350,13 +356,13 @@ app.get('/api/subscriptions', (req, res) => {
 });
 
 app.post('/api/subscriptions', (req, res) => {
-  const { id, name } = req.body || {};
+  const { id, name, avatar } = req.body || {};
   if (typeof id !== 'string' || !/^UC[A-Za-z0-9_-]{20,30}$/.test(id) || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Invalid channel.' });
   }
   const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []);
   if (!subscriptions.some((channel) => channel.id === id)) {
-    subscriptions.push({ id, name: name.trim().slice(0, 100), followedAt: Date.now() });
+    subscriptions.push({ id, name: name.trim().slice(0, 100), avatar: typeof avatar === 'string' ? avatar : `/api/channel-avatar/${id}`, followedAt: Date.now() });
     writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
   }
   res.json({ subscriptions });
@@ -373,9 +379,13 @@ app.get('/api/feed', async (req, res) => {
   const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 8);
   if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
   try {
+    const page = Math.max(1, Math.min(20, Number.parseInt(req.query.page, 10) || 1));
+    const perChannel = 5;
+    const start = ((page - 1) * perChannel) + 1;
+    const end = page * perChannel;
     const feeds = await Promise.all(subscriptions.map(async (channel) => {
       const raw = await runYtDlp([
-        '--flat-playlist', '--playlist-end', '5', '--dump-single-json', '--no-warnings',
+        '--flat-playlist', '--playlist-start', String(start), '--playlist-end', String(end), '--dump-single-json', '--no-warnings',
         `https://www.youtube.com/channel/${channel.id}/videos`
       ], 45000);
       const data = JSON.parse(raw);
@@ -390,10 +400,11 @@ app.get('/api/feed', async (req, res) => {
         channelId: entry.channel_id || entry.uploader_id || '',
         duration: Number.isFinite(entry.duration) ? entry.duration : null,
         timestamp: entry.timestamp || null,
-        thumbnail: `/api/thumbnail/${entry.id}`
+        thumbnail: `/api/thumbnail/${entry.id}`,
+        channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : channel.avatar
       }))
       .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    res.json({ videos });
+    res.json({ videos, page, hasMore: videos.length > 0 });
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
@@ -405,8 +416,12 @@ app.get('/api/channels/:id', async (req, res) => {
     return res.status(400).json({ error: 'Invalid channel ID.' });
   }
   try {
+    const page = Math.max(1, Math.min(50, Number.parseInt(req.query.page, 10) || 1));
+    const pageSize = 24;
+    const start = ((page - 1) * pageSize) + 1;
+    const end = page * pageSize;
     const raw = await runYtDlp([
-      '--flat-playlist', '--playlist-end', '30', '--dump-single-json', '--no-warnings',
+      '--flat-playlist', '--playlist-start', String(start), '--playlist-end', String(end), '--dump-single-json', '--no-warnings',
       `https://www.youtube.com/channel/${channelId}/videos`
     ], 45000);
     const data = JSON.parse(raw);
@@ -436,7 +451,9 @@ app.get('/api/channels/:id', async (req, res) => {
         avatar: proxiedImageUrl(avatarUrl),
         banner: proxiedImageUrl(bannerUrl)
       },
-      videos
+      videos,
+      page,
+      hasMore: videos.length === pageSize
     });
   } catch (error) {
     res.status(502).json({ error: error.message });
@@ -448,7 +465,7 @@ app.get('/api/history', (req, res) => {
 });
 
 app.post('/api/history', (req, res) => {
-  const { id, title, channel, channelId } = req.body || {};
+  const { id, title, channel, channelId, channelAvatar } = req.body || {};
   if (!isValidVideoId(id)) return res.status(400).json({ error: 'Invalid video.' });
   const history = readJsonFile(HISTORY_FILE, []).filter((item) => item.id !== id);
   history.unshift({
@@ -456,6 +473,7 @@ app.post('/api/history', (req, res) => {
     title: String(title || 'Untitled video').slice(0, 200),
     channel: String(channel || '').slice(0, 100),
     channelId: typeof channelId === 'string' ? channelId : '',
+    channelAvatar: typeof channelAvatar === 'string' ? channelAvatar : (channelId ? `/api/channel-avatar/${channelId}` : ''),
     watchedAt: Date.now(),
     thumbnail: `/api/thumbnail/${id}`
   });
@@ -619,6 +637,30 @@ app.get('/api/thumbnail/:id', async (req, res) => {
   }
 });
 
+app.get('/api/channel-avatar/:id', async (req, res) => {
+  const channelId = req.params.id;
+  if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(channelId)) return res.status(400).send('Invalid channel ID.');
+  try {
+    let imageUrl = channelAvatarCache.get(channelId);
+    if (!imageUrl) {
+      const raw = await runYtDlp([
+        '--flat-playlist', '--playlist-end', '1', '--dump-single-json', '--no-warnings',
+        `https://www.youtube.com/channel/${channelId}/videos`
+      ], 30000);
+      imageUrl = pickChannelImage(JSON.parse(raw).thumbnails, 'avatar');
+      if (!imageUrl) return res.status(404).send('Avatar unavailable.');
+      channelAvatarCache.set(channelId, imageUrl);
+    }
+    const upstream = await axios.get(imageUrl, { responseType: 'stream', timeout: 10000, maxRedirects: 3 });
+    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=604800');
+    upstream.data.on('error', () => res.destroy());
+    upstream.data.pipe(res);
+  } catch {
+    if (!res.headersSent) res.status(502).send('Avatar unavailable.');
+  }
+});
+
 // Maps a quality choice from the GUI to a yt-dlp format selector.
 // Using height<=N with a fallback chain so it still works if that exact
 // resolution isn't available for a given video.
@@ -634,7 +676,7 @@ const QUALITY_FORMATS = {
 };
 
 app.post('/api/download', (req, res) => {
-  const { url, quality } = req.body || {};
+  const { url, quality, video } = req.body || {};
   if (!url || !isValidYoutubeUrl(url)) {
     return res.status(400).json({ error: 'That does not look like a valid YouTube URL.' });
   }
@@ -643,7 +685,7 @@ app.post('/api/download', (req, res) => {
   const audioOnly = quality === 'audio';
 
   const id = crypto.randomBytes(8).toString('hex');
-  jobs[id] = { status: 'processing', progress: 0 };
+  jobs[id] = { status: 'processing', progress: 0, video };
 
   const outputTemplate = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
 
@@ -692,7 +734,16 @@ app.post('/api/download', (req, res) => {
       jobs[id] = { status: 'error', error: 'yt-dlp finished but produced no file.' };
       return;
     }
-    jobs[id] = { status: 'done', filename: files[0] };
+    jobs[id] = { status: 'done', filename: files[0], video };
+    const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
+    metadata[files[0]] = {
+      id: isValidVideoId(video?.id) ? video.id : '',
+      title: String(video?.title || files[0]).slice(0, 200),
+      channel: String(video?.channel || '').slice(0, 100),
+      channelId: typeof video?.channelId === 'string' ? video.channelId : '',
+      downloadedAt: Date.now()
+    };
+    writeJsonFile(DOWNLOAD_METADATA_FILE, metadata);
     // Files now stick around until you delete them from the "on server"
     // list in the GUI, rather than auto-expiring.
   });
@@ -717,6 +768,7 @@ app.get('/api/status/:id', (req, res) => {
 // ---------- file manager ----------
 
 app.get('/api/files', (req, res) => {
+  const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
   const files = fs.readdirSync(DOWNLOAD_DIR)
     .filter((f) => !f.startsWith('.'))
     .map((f) => {
@@ -726,7 +778,9 @@ app.get('/api/files', (req, res) => {
         name: f,
         size: stat.size,
         mtime: stat.mtimeMs,
-        url: `/files/${encodeURIComponent(f)}?token=${token}`
+        url: `/files/${encodeURIComponent(f)}?token=${token}`,
+        ...(metadata[f] || {}),
+        thumbnail: metadata[f]?.id ? `/api/thumbnail/${metadata[f].id}` : ''
       };
     })
     .sort((a, b) => b.mtime - a.mtime);
@@ -741,6 +795,9 @@ app.delete('/api/files/:name', (req, res) => {
   }
   fs.unlink(fp, (err) => {
     if (err) return res.status(404).json({ error: 'File not found.' });
+    const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
+    delete metadata[name];
+    writeJsonFile(DOWNLOAD_METADATA_FILE, metadata);
     res.json({ ok: true });
   });
 });
