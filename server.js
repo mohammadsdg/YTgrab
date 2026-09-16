@@ -33,7 +33,7 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const SEARCH_LIMIT = 20;
-const STREAM_CACHE_VERSION = 'hls-v1';
+const STREAM_CACHE_VERSION = 'hls-v2';
 
 // Signed download tokens: let tools like aria2/wget/curl (which don't carry
 // browser cookies) fetch a specific file without logging in, as long as
@@ -523,7 +523,7 @@ app.post('/api/stream/:id/prepare', (req, res) => {
       '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.0', '-tag:v', 'avc1',
       '-force_key_frames', 'expr:gte(t,n_forced*6)',
       '-c:a', 'aac', '-b:a', '160k',
-      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod',
+      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'event',
       '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
       buildingPlaylist
     ]);
@@ -553,20 +553,28 @@ app.post('/api/stream/:id/prepare', (req, res) => {
 
 app.get('/api/stream/:id/status', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const playlistFile = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
+  const finalPlaylist = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
+  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}-building`);
+  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
+  if (fs.existsSync(finalPlaylist)) return res.json({ status: 'done', url: `/api/hls/${req.params.id}/index.m3u8` });
+  if (fs.existsSync(buildingPlaylist) && fs.readdirSync(buildingDir).some((name) => name.endsWith('.ts'))) {
+    return res.json({ status: 'done', streaming: true, url: `/api/hls/${req.params.id}/index.m3u8` });
+  }
   if (streamJobs[req.params.id] && streamJobs[req.params.id].status !== 'done') {
     return res.json(streamJobs[req.params.id]);
   }
-  if (fs.existsSync(playlistFile)) return res.json({ status: 'done', url: `/api/hls/${req.params.id}/index.m3u8` });
   res.json(streamJobs[req.params.id] || { status: 'idle' });
 });
 
 app.get('/api/hls/:id/:file', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
   if (!/^(index\.m3u8|segment-\d{5}\.ts)$/.test(req.params.file)) return res.status(400).send('Invalid stream file.');
-  const file = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`, req.params.file);
+  const finalDir = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}`);
+  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${STREAM_CACHE_VERSION}-building`);
+  const activeDir = fs.existsSync(path.join(finalDir, req.params.file)) ? finalDir : buildingDir;
+  const file = path.join(activeDir, req.params.file);
   if (!fs.existsSync(file)) return res.status(404).send('Stream file not found.');
-  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.setHeader('Cache-Control', req.params.file.endsWith('.m3u8') ? 'no-store' : 'private, max-age=86400');
   res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t');
   res.sendFile(file);
 });
