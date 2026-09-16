@@ -1,6 +1,6 @@
 # ytgrab
 
-A tiny self-hosted YouTube downloader. Paste a link, pick a quality, get an mp4 (or mp3).
+A tiny self-hosted YouTube search and downloader. Search or paste a link, pick a quality, get an mp4 (or mp3). Search requests and thumbnails are proxied through the server, so the browser does not connect to YouTube directly.
 
 I made this because I was tired of sketchy download sites full of ads. Used AI to help knock out the frontend, coded the backend myself. Also threw together a Telegram bot so I can grab stuff straight from my phone without opening the site.
 ## What's in here

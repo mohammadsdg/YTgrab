@@ -86,6 +86,79 @@
     padding: 18px;
   }
 
+  .search-card { margin-bottom: 16px; }
+  .download-card { display: none; }
+  .search-row { display: flex; gap: 8px; }
+  .search-row .input-shell { min-height: 48px; }
+  .search-btn {
+    border: none;
+    border-radius: 10px;
+    padding: 0 18px;
+    background: var(--teal);
+    color: #09201e;
+    font: 700 14px 'Space Grotesk', sans-serif;
+    cursor: pointer;
+  }
+  .search-btn:disabled { opacity: .5; cursor: wait; }
+  .search-status {
+    display: none;
+    margin-top: 12px;
+    color: var(--muted);
+    font: 12px 'IBM Plex Mono', monospace;
+  }
+  .search-results-label {
+    display: none;
+    margin-top: 18px;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .search-results { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+  .search-result {
+    display: grid;
+    grid-template-columns: 124px minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #12161a;
+    color: var(--text);
+    text-align: left;
+  }
+  .search-result img { width: 124px; aspect-ratio: 16/9; object-fit: cover; border-radius: 7px; background: var(--card-raised); }
+  .search-result-info { min-width: 0; align-self: center; }
+  .search-result-title { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .search-result-meta { margin-top: 6px; color: var(--muted); font: 10px 'IBM Plex Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .result-download-btn {
+    align-self: center;
+    border: 1px solid rgba(79, 209, 197, .45);
+    border-radius: 8px;
+    padding: 9px 12px;
+    background: rgba(79, 209, 197, .08);
+    color: var(--teal);
+    font: 600 11px 'IBM Plex Mono', monospace;
+    cursor: pointer;
+  }
+  .result-download-btn:active { transform: scale(.97); }
+  .result-qualities {
+    display: none;
+    grid-column: 2 / 4;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-bottom: 3px;
+  }
+  .result-qualities.open { display: flex; }
+  .result-quality {
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 7px 10px;
+    background: var(--card-raised);
+    color: var(--muted);
+    font: 11px 'IBM Plex Mono', monospace;
+    cursor: pointer;
+  }
+  .result-quality:hover { border-color: var(--amber); color: var(--amber); }
+
   .sprockets {
     display: flex;
     gap: 6px;
@@ -417,40 +490,43 @@
     .wrap { max-width: 560px; }
     .card { padding: 24px; }
   }
+  @media (max-width: 440px) {
+    .search-result { grid-template-columns: 112px minmax(0, 1fr); }
+    .search-result img { width: 112px; }
+    .result-download-btn { grid-column: 2; justify-self: start; margin-top: -4px; }
+    .result-qualities { grid-column: 2; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div class="wordmark">ytgrab<span class="dot">.</span></div>
+    <div class="wordmark">YTgrab<span class="dot">.</span></div>
     <button id="logoutBtn" class="logout-btn mono" type="button">log out</button>
   </header>
 
-  <div class="card">
-    <div class="sprockets">
-      <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
-    </div>
-
-    <div class="input-row">
+  <div class="card search-card">
+    <div class="search-row">
       <div class="input-shell">
         <input
           id="url"
-          type="url"
-          inputmode="url"
+          type="text"
+          inputmode="search"
+          autocomplete="off"
           autocapitalize="off"
           autocorrect="off"
           spellcheck="false"
-          placeholder="paste youtube link"
+          placeholder="search or paste youtube link"
         />
       </div>
-      <button class="paste-btn" id="pasteBtn" type="button" aria-label="Paste from clipboard">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="9" y="2" width="6" height="4" rx="1"></rect>
-          <path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3"></path>
-        </svg>
-      </button>
+      <button class="search-btn" id="searchBtn" type="button">Go</button>
     </div>
+    <div class="search-status" id="searchStatus"></div>
+    <div class="search-results-label" id="searchResultsLabel">Search results</div>
+    <div class="search-results" id="searchResults"></div>
+  </div>
 
+  <div class="card download-card" id="downloadCard">
     <div class="preview" id="preview">
       <img id="thumbImg" src="" alt="Video thumbnail" />
       <div class="badge mono" id="videoIdBadge" style="position:absolute; z-index:1;"></div>
@@ -503,8 +579,8 @@
 
 <script>
 const urlInput = document.getElementById('url');
-const pasteBtn = document.getElementById('pasteBtn');
 const preview = document.getElementById('preview');
+const downloadCard = document.getElementById('downloadCard');
 const thumbImg = document.getElementById('thumbImg');
 const videoIdBadge = document.getElementById('videoIdBadge');
 const pills = document.getElementById('pills');
@@ -521,13 +597,15 @@ const logoutBtn = document.getElementById('logoutBtn');
 const fileList = document.getElementById('fileList');
 const filesCount = document.getElementById('filesCount');
 const filesEmpty = document.getElementById('filesEmpty');
+const searchBtn = document.getElementById('searchBtn');
+const searchStatus = document.getElementById('searchStatus');
+const searchResults = document.getElementById('searchResults');
+const searchResultsLabel = document.getElementById('searchResultsLabel');
 
 const RING_CIRCUMFERENCE = 226; // 2 * PI * 36, matches CSS
 
 let quality = '1080';
 let polling = null;
-let thumbFallbackStage = 0;
-const THUMB_SIZES = ['hqdefault', 'mqdefault', 'sddefault', 'default'];
 
 // ---- quality pills ----
 pills.addEventListener('click', (e) => {
@@ -537,23 +615,6 @@ pills.addEventListener('click', (e) => {
   pill.classList.add('active');
   quality = pill.dataset.q;
 });
-
-// ---- clipboard paste ----
-if (!navigator.clipboard || !navigator.clipboard.readText) {
-  pasteBtn.style.display = 'none';
-} else {
-  pasteBtn.addEventListener('click', async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) {
-        urlInput.value = text.trim();
-        updateThumbnail();
-      }
-    } catch {
-      urlInput.focus();
-    }
-  });
-}
 
 // ---- thumbnail preview, purely from the video ID ----
 function extractVideoId(url) {
@@ -584,29 +645,135 @@ function updateThumbnail() {
   const id = extractVideoId(urlInput.value.trim());
   if (!id) {
     preview.style.display = 'none';
+    downloadCard.style.display = 'none';
     return;
   }
-  thumbFallbackStage = 0;
+  searchResults.innerHTML = '';
+  searchResultsLabel.style.display = 'none';
+  searchStatus.style.display = 'none';
+  downloadCard.style.display = 'block';
   videoIdBadge.textContent = id;
   preview.style.display = 'block';
   preview.classList.remove('preview-broken');
   thumbImg.style.display = 'block';
-  thumbImg.src = `https://img.youtube.com/vi/${id}/${THUMB_SIZES[0]}.jpg`;
+  thumbImg.src = `/api/thumbnail/${encodeURIComponent(id)}`;
 }
 
 thumbImg.addEventListener('error', () => {
-  thumbFallbackStage++;
-  if (thumbFallbackStage < THUMB_SIZES.length) {
-    const id = videoIdBadge.textContent;
-    thumbImg.src = `https://img.youtube.com/vi/${id}/${THUMB_SIZES[thumbFallbackStage]}.jpg`;
-  } else {
-    // Every size failed (often an ad-blocker/privacy extension blocking
-    // img.youtube.com). Keep the box visible with a neutral placeholder
-    // instead of hiding it — hiding it made it look like a bug.
-    thumbImg.style.display = 'none';
-    preview.classList.add('preview-broken');
-  }
+  thumbImg.style.display = 'none';
+  preview.classList.add('preview-broken');
 });
+
+// ---- YouTube search (all upstream traffic goes through this server) ----
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return '';
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  return hours
+    ? `${hours}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function renderSearchResults(items) {
+  searchResults.innerHTML = '';
+  searchResultsLabel.style.display = items.length ? 'block' : 'none';
+  searchResultsLabel.textContent = `Search results · ${items.length}`;
+  items.forEach((item) => {
+    const card = document.createElement('div');
+    card.className = 'search-result';
+
+    const img = document.createElement('img');
+    img.src = item.thumbnail;
+    img.alt = '';
+    img.loading = 'lazy';
+
+    const info = document.createElement('div');
+    info.className = 'search-result-info';
+    const title = document.createElement('div');
+    title.className = 'search-result-title';
+    title.textContent = item.title;
+    const meta = document.createElement('div');
+    meta.className = 'search-result-meta';
+    meta.textContent = [item.channel, formatDuration(item.duration)].filter(Boolean).join(' · ');
+    info.append(title, meta);
+
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'result-download-btn';
+    downloadBtn.type = 'button';
+    downloadBtn.textContent = 'Download';
+
+    const qualities = document.createElement('div');
+    qualities.className = 'result-qualities';
+    [['1080', '1080p'], ['720', '720p'], ['audio', 'Audio'], ['best', 'Best']].forEach(([value, label]) => {
+      const qualityBtn = document.createElement('button');
+      qualityBtn.className = 'result-quality';
+      qualityBtn.type = 'button';
+      qualityBtn.textContent = label;
+      qualityBtn.addEventListener('click', () => {
+        quality = value;
+        document.querySelectorAll('.pill').forEach((pill) => {
+          pill.classList.toggle('active', pill.dataset.q === value);
+        });
+        downloadBtn.textContent = 'Starting…';
+        downloadBtn.disabled = true;
+        qualities.classList.remove('open');
+        startDownload(item.url, downloadBtn);
+      });
+      qualities.appendChild(qualityBtn);
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      const opening = !qualities.classList.contains('open');
+      document.querySelectorAll('.result-qualities.open').forEach((el) => el.classList.remove('open'));
+      qualities.classList.toggle('open', opening);
+      downloadBtn.textContent = opening ? 'Choose quality' : 'Download';
+    });
+
+    card.append(img, info, downloadBtn, qualities);
+    img.addEventListener('click', () => {
+      urlInput.value = item.url;
+      updateThumbnail();
+    });
+    searchResults.appendChild(card);
+  });
+}
+
+async function runSearch() {
+  const query = urlInput.value.trim();
+  if (!query) { urlInput.focus(); return; }
+
+  if (extractVideoId(query)) {
+    searchResults.innerHTML = '';
+    searchResultsLabel.style.display = 'none';
+    searchStatus.style.display = 'none';
+    updateThumbnail();
+    downloadCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+
+  downloadCard.style.display = 'none';
+  searchBtn.disabled = true;
+  searchResultsLabel.style.display = 'none';
+  searchStatus.style.display = 'block';
+  searchStatus.textContent = 'searching from server…';
+  searchResults.innerHTML = '';
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Search failed');
+    renderSearchResults(data.results);
+    searchStatus.style.display = data.results.length ? 'none' : 'block';
+    searchStatus.textContent = data.results.length ? '' : 'no results found';
+  } catch (err) {
+    searchStatus.textContent = err.message;
+  } finally {
+    searchBtn.disabled = false;
+  }
+}
+
+searchBtn.addEventListener('click', runSearch);
+urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
 
 // ---- download flow ----
 function setRing(percent) {
@@ -622,9 +789,22 @@ function reset() {
   setRing(0);
 }
 
-async function startDownload() {
-  const url = urlInput.value.trim();
+async function startDownload(urlOverride, sourceButton) {
+  const url = typeof urlOverride === 'string' ? urlOverride : urlInput.value.trim();
   if (!url) { urlInput.focus(); return; }
+  if (goBtn.disabled) {
+    if (sourceButton) {
+      sourceButton.disabled = false;
+      sourceButton.textContent = 'Download';
+    }
+    return;
+  }
+
+  if (urlOverride) {
+    urlInput.value = url;
+    updateThumbnail();
+    downloadCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   reset();
   goBtn.disabled = true;
@@ -639,13 +819,17 @@ async function startDownload() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to start');
-    poll(data.id);
+    poll(data.id, sourceButton);
   } catch (err) {
+    if (sourceButton) {
+      sourceButton.disabled = false;
+      sourceButton.textContent = 'Download';
+    }
     fail(err.message);
   }
 }
 
-function poll(id) {
+function poll(id, sourceButton) {
   polling = setInterval(async () => {
     try {
       const res = await fetch(`/api/status/${id}`);
@@ -658,6 +842,7 @@ function poll(id) {
         statusText.textContent = p ? `downloading… ${p.toFixed(0)}%` : 'downloading…';
       } else if (data.status === 'done') {
         clearInterval(polling);
+        polling = null;
         setRing(100);
         statusText.textContent = 'done';
         progressWrap.style.display = 'none';
@@ -665,13 +850,27 @@ function poll(id) {
         resultName.textContent = data.filename;
         result.style.display = 'block';
         goBtn.disabled = false;
+        if (sourceButton) {
+          sourceButton.disabled = false;
+          sourceButton.textContent = 'Downloaded';
+        }
         loadFiles();
       } else if (data.status === 'error') {
         clearInterval(polling);
+        polling = null;
+        if (sourceButton) {
+          sourceButton.disabled = false;
+          sourceButton.textContent = 'Try again';
+        }
         fail(data.error);
       }
     } catch (err) {
       clearInterval(polling);
+      polling = null;
+      if (sourceButton) {
+        sourceButton.disabled = false;
+        sourceButton.textContent = 'Try again';
+      }
       fail(err.message);
     }
   }, 1500);
@@ -684,8 +883,7 @@ function fail(msg) {
   goBtn.disabled = false;
 }
 
-goBtn.addEventListener('click', startDownload);
-urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') startDownload(); });
+goBtn.addEventListener('click', () => startDownload());
 urlInput.addEventListener('paste', () => setTimeout(updateThumbnail, 50));
 
 // ---- logout ----

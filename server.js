@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,6 +14,9 @@ const PASSWORD = process.env.YTGRAB_PASSWORD || 'mamadsdg15';
 const SESSION_COOKIE = 'ytgrab_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
+const searchCache = new Map();
+const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
+const SEARCH_LIMIT = 20;
 
 // Signed download tokens: let tools like aria2/wget/curl (which don't carry
 // browser cookies) fetch a specific file without logging in, as long as
@@ -153,6 +157,90 @@ function isValidYoutubeUrl(url) {
     return false;
   }
 }
+
+function isValidVideoId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9_-]{11}$/.test(id);
+}
+
+// Search runs on this server, so the browser never has to reach YouTube.
+app.get('/api/search', (req, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!query || query.length > 200) {
+    return res.status(400).json({ error: 'Search must be between 1 and 200 characters.' });
+  }
+
+  const cacheKey = query.toLocaleLowerCase();
+  const cached = searchCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return res.json({ results: cached.results });
+
+  const args = [
+    '--flat-playlist',
+    '--dump-single-json',
+    '--no-warnings',
+    '--extractor-args', 'youtube:player_client=default,tv_simply',
+    `ytsearch${SEARCH_LIMIT}:${query}`
+  ];
+  const proc = spawn('yt-dlp', args);
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+
+  const timer = setTimeout(() => proc.kill('SIGKILL'), 30000);
+  proc.stdout.on('data', (chunk) => {
+    // Search JSON should be small; stop a broken process from consuming memory.
+    if (stdout.length < 5 * 1024 * 1024) stdout += chunk.toString();
+    else proc.kill('SIGKILL');
+  });
+  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  proc.on('error', (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    res.status(500).json({ error: `Could not start yt-dlp: ${err.message}` });
+  });
+  proc.on('close', (code) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (code !== 0) {
+      return res.status(502).json({ error: stderr.slice(-800) || 'YouTube search failed.' });
+    }
+    try {
+      const data = JSON.parse(stdout);
+      const results = (Array.isArray(data.entries) ? data.entries : [])
+        .filter((entry) => entry && isValidVideoId(entry.id))
+        .map((entry) => ({
+          id: entry.id,
+          title: entry.title || 'Untitled video',
+          channel: entry.channel || entry.uploader || '',
+          duration: Number.isFinite(entry.duration) ? entry.duration : null,
+          url: `https://www.youtube.com/watch?v=${entry.id}`,
+          thumbnail: `/api/thumbnail/${entry.id}`
+        }));
+      searchCache.set(cacheKey, { results, expires: Date.now() + SEARCH_CACHE_TTL_MS });
+      res.json({ results });
+    } catch {
+      res.status(502).json({ error: 'YouTube returned an unreadable search response.' });
+    }
+  });
+});
+
+// Fixed upstream host + validated video ID avoids turning this into an open proxy.
+app.get('/api/thumbnail/:id', async (req, res) => {
+  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
+  try {
+    const upstream = await axios.get(
+      `https://i.ytimg.com/vi/${req.params.id}/hqdefault.jpg`,
+      { responseType: 'stream', timeout: 10000, maxRedirects: 2 }
+    );
+    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=86400');
+    upstream.data.on('error', () => res.destroy());
+    upstream.data.pipe(res);
+  } catch {
+    if (!res.headersSent) res.status(502).send('Thumbnail unavailable.');
+  }
+});
 
 // Maps a quality choice from the GUI to a yt-dlp format selector.
 // Using height<=N with a fallback chain so it still works if that exact
