@@ -24,6 +24,8 @@ const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
 const PASSWORD = process.env.YTGRAB_PASSWORD;
 const COOKIES_FILE = process.env.YT_DLP_COOKIES ? path.resolve(__dirname, process.env.YT_DLP_COOKIES) : null;
 const NODE_MAJOR = Number.parseInt(process.versions.node.split('.')[0], 10);
+const YT_DLP_USER_AGENT = process.env.YT_DLP_USER_AGENT?.trim();
+const YT_DLP_PROXY = process.env.YT_DLP_PROXY?.trim();
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   console.error('PORT must be set to a valid port number in .env');
@@ -49,11 +51,11 @@ const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
 const ytDlpMetadataQueue = [];
 let activeYtDlpMetadata = 0;
-const MAX_YT_DLP_METADATA = 4;
+const MAX_YT_DLP_METADATA = 2;
 const STREAM_CACHE_VERSION = 'hls-v5';
 const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
-const MAX_ACTIVE_DOWNLOADS = 6;
-const MAX_ACTIVE_STREAMS = 4;
+const MAX_ACTIVE_DOWNLOADS = 3;
+const MAX_ACTIVE_STREAMS = 2;
 const DOWNLOAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_TOKEN_SECRET = crypto.createHash('sha256').update(`ytgrab-download:${PASSWORD}`).digest();
 
@@ -302,15 +304,16 @@ function ytDlpArgs(args) {
   const common = ['--remote-components', 'ejs:github'];
   if (NODE_MAJOR >= 22) common.push('--js-runtimes', 'node');
   if (COOKIES_FILE) common.push('--cookies', COOKIES_FILE);
+  if (YT_DLP_USER_AGENT) common.push('--user-agent', YT_DLP_USER_AGENT);
+  if (YT_DLP_PROXY) common.push('--proxy', YT_DLP_PROXY);
   return [...common, ...args];
 }
 
 function ytDlpMediaArgs(args) {
   return ytDlpArgs([
-    '--extractor-args', 'youtube:player_client=web_embedded,android_vr,web_safari',
-    '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
-    '--add-header', 'Referer:https://www.youtube.com/',
-    '--add-header', 'Origin:https://www.youtube.com',
+    // Current yt-dlp guidance recommends mweb with an installed PO-token
+    // provider. The provider supplies a fresh video-bound token automatically.
+    '--extractor-args', 'youtube:player_client=mweb',
     ...args
   ]);
 }
