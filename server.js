@@ -36,6 +36,8 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
+const feedCache = new Map();
+const FEED_CACHE_TTL_MS = 1000 * 60 * 10;
 const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
 const STREAM_CACHE_VERSION = 'hls-v4';
@@ -388,6 +390,7 @@ app.post('/api/subscriptions', (req, res) => {
   if (!subscriptions.some((channel) => channel.id === id)) {
     subscriptions.push({ id, name: name.trim().slice(0, 100), avatar: `/api/channel-avatar/${id}`, followedAt: Date.now() });
     writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
+    feedCache.clear();
   }
   res.json({ subscriptions });
 });
@@ -396,6 +399,7 @@ app.delete('/api/subscriptions/:id', (req, res) => {
   const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, [])
     .filter((channel) => channel.id !== req.params.id);
   writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
+  feedCache.clear();
   res.json({ subscriptions });
 });
 
@@ -404,7 +408,13 @@ app.get('/api/feed', expensiveLimiter, async (req, res) => {
   if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
   try {
     const page = Math.max(1, Math.min(20, Number.parseInt(req.query.page, 10) || 1));
-    const perChannel = 5;
+    const subscriptionKey = subscriptions.map((channel) => channel.id).sort().join(',');
+    const cacheKey = `${subscriptionKey}:${page}`;
+    const cached = feedCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) return res.json(cached.value);
+    // The first page is the latency-sensitive one. Three recent uploads per
+    // channel is enough to fill the home screen without needlessly fetching 5x.
+    const perChannel = page === 1 ? 3 : 5;
     const start = ((page - 1) * perChannel) + 1;
     const end = page * perChannel;
     const attempts = await Promise.allSettled(subscriptions.map(async (channel) => {
@@ -439,7 +449,9 @@ app.get('/api/feed', expensiveLimiter, async (req, res) => {
       const firstError = attempts.find((attempt) => attempt.status === 'rejected')?.reason;
       throw firstError || new Error('Could not load subscriptions.');
     }
-    res.json({ videos, page, hasMore: videos.length > 0 });
+    const value = { videos, page, hasMore: videos.length > 0 };
+    feedCache.set(cacheKey, { value, expires: Date.now() + FEED_CACHE_TTL_MS });
+    res.json(value);
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
@@ -590,6 +602,9 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
       ...mediaArgs,
       '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'event',
+      // Tell HLS clients to start at the beginning instead of treating the
+      // growing event playlist like a live broadcast and joining its live edge.
+      '-start_number', '0',
       '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
       '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
       buildingPlaylist
@@ -644,8 +659,20 @@ app.get('/api/hls/:id/:quality/:file', (req, res) => {
   const activeDir = fs.existsSync(path.join(finalDir, req.params.file)) ? finalDir : buildingDir;
   const file = path.join(activeDir, req.params.file);
   if (!fs.existsSync(file)) return res.status(404).send('Stream file not found.');
-  res.setHeader('Cache-Control', req.params.file.endsWith('.m3u8') ? 'no-store' : 'private, max-age=86400');
-  res.type(req.params.file.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp4');
+  if (req.params.file.endsWith('.m3u8')) {
+    // An EVENT playlist is playable while ffmpeg is still appending segments,
+    // but many clients otherwise join at its live edge. EXT-X-START makes the
+    // intended VOD-like behavior explicit, including on native-HLS browsers.
+    const playlist = fs.readFileSync(file, 'utf8');
+    const withStart = playlist.includes('#EXT-X-START:')
+      ? playlist
+      : playlist.replace('#EXTM3U', '#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES');
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('application/vnd.apple.mpegurl').send(withStart);
+    return;
+  }
+  res.setHeader('Cache-Control', 'private, max-age=86400');
+  res.type('video/mp4');
   res.sendFile(file);
 });
 

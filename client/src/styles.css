@@ -85,7 +85,7 @@ button, input { font: inherit; }
 .channel-description { grid-column: 1 / -1; max-width: 900px; margin: 0 !important; white-space: pre-line; line-height: 1.8 !important; text-align: start; }
 .back-button { color: var(--muted) !important; margin-bottom: 6px !important; }
 .channel-loading { min-height: 400px; display: grid; place-items: center; }
-.mobile-dock { position: fixed; z-index: 20; left: 50%; bottom: max(12px,env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(480px,calc(100% - 24px)); height: 68px; padding: 6px; display: grid; grid-template-columns: repeat(4,1fr); border: 1px solid var(--line); border-radius: 14px !important; background: var(--surface) !important; }
+.mobile-dock { position: fixed; z-index: 20; left: 50%; bottom: max(12px,env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(560px,calc(100% - 24px)); height: 68px; padding: 6px; display: grid; grid-template-columns: repeat(5,1fr); border: 1px solid var(--line); border-radius: 14px !important; background: var(--surface) !important; }
 .mobile-dock button { border: 0; border-radius: 14px; background: transparent; color: var(--muted); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 1px; cursor: pointer; }
 .mobile-dock button svg { font-size: 22px; }
 .mobile-dock button span { font-size: 10px; font-weight: 500; }
@@ -100,6 +100,7 @@ button, input { font: inherit; }
 .player-preparing { width: 100%; min-height: 360px; padding: 40px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; background: #08080a; }
 .dialog-close { position: absolute !important; z-index: 2; top: 8px; right: 8px; color: #fff !important; background: rgba(0,0,0,.55) !important; }
 .load-more-sentinel { min-height: 72px; display: grid; place-items: center; }
+.feed-loading { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
 .download-queue { position: fixed; z-index: 40; right: 18px; bottom: 94px; width: min(370px,calc(100vw - 36px)); max-height: min(440px,55vh); border: 1px solid var(--line); border-radius: 12px !important; overflow: hidden; color: var(--text) !important; background: var(--surface) !important; animation: queue-in .2s ease-out; }
 .download-queue-heading { height: 48px; padding: 0 13px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
 .download-queue-heading > :last-child { margin-left: auto; }
@@ -138,9 +139,17 @@ button, input { font: inherit; }
   .channel-header > button { width: 100%; min-height: 42px; }
   .channel-description { grid-column: 1; font-size: 13px !important; line-height: 1.75 !important; max-height: 180px; overflow-y: auto; }
   .settings-card { flex-wrap: wrap; }
-  .subscription-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+  .subscription-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .subscription-card .MuiAvatar-root { width: 54px; height: 54px; }
   .downloads-grid { grid-template-columns: 1fr; }
-  .file-item > img, .file-placeholder { width: 104px; }
+  .file-item { display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 10px; padding: 10px; }
+  .file-item > img, .file-placeholder { width: 92px; }
+  .file-actions { grid-column: 1 / -1; flex-direction: row; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 6px; }
+  .history-toggle { margin-top: 24px; }
+  .mobile-dock { width: calc(100% - 16px); bottom: max(8px,env(safe-area-inset-bottom)); padding: 4px; }
+  .mobile-dock button { min-width: 0; }
+  .mobile-dock button span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  .player-dialog { margin: 8px !important; width: calc(100% - 16px) !important; max-height: calc(100% - 16px) !important; }
+  .player-quality { padding-right: 48px; overflow-x: auto; }
   .download-queue { right: 12px; bottom: 92px; width: calc(100vw - 24px); max-height: 45vh; }
 }

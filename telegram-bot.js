@@ -1,6 +1,6 @@
 
 require('dotenv').config();
-const { TelegramBot } = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -119,10 +119,35 @@ function qualityKeyboard(videoId) {
 }
 
 bot.onText(/\/start/, (msg) => {
+  if (!isAllowed(msg.from.id)) return;
   bot.sendMessage(
     msg.chat.id,
-    "yo 👋 drop a youtube link whenever and i'll sort it out for you"
+    "yo 👋 drop a youtube link whenever and i'll sort it out for you\n\n/files — see your downloaded files"
   );
+});
+
+bot.onText(/^\/files(?:@\w+)?$/, async (msg) => {
+  if (!isAllowed(msg.from.id)) {
+    return bot.sendMessage(msg.chat.id, "nah you're not on the list for this one 👀");
+  }
+  try {
+    const response = await api('get', '/api/files');
+    if (response.status !== 200) throw new Error(response.data?.error || 'Could not load files.');
+    const files = response.data.files || [];
+    if (!files.length) return bot.sendMessage(msg.chat.id, 'no downloaded files yet');
+
+    await bot.sendMessage(msg.chat.id, `your downloads (${files.length})`);
+    for (let offset = 0; offset < files.length; offset += 10) {
+      const batch = files.slice(offset, offset + 10);
+      const lines = batch.map((file, index) => {
+        const size = (file.size / 1048576).toFixed(1);
+        return `${offset + index + 1}. ${file.title || file.name} — ${size} MB\n${YTGRAB_URL}${file.url}`;
+      });
+      await bot.sendMessage(msg.chat.id, lines.join('\n\n'), { disable_web_page_preview: true });
+    }
+  } catch (error) {
+    return bot.sendMessage(msg.chat.id, `couldn't load the files — ${error.message}`);
+  }
 });
 
 bot.on('message', async (msg) => {

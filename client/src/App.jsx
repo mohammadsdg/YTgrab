@@ -9,11 +9,12 @@ import {
   AddRounded, ArrowBackRounded, CheckRounded, CloseRounded, DarkModeRounded, DeleteOutlineRounded, DownloadRounded, ExpandMoreRounded, ExploreRounded,
   GitHub,
   HomeRounded, LogoutRounded, PersonAddRounded, PlayArrowRounded, SearchRounded,
-  SettingsRounded, SubscriptionsRounded, UploadRounded, VideoLibraryRounded, WallpaperRounded
+  SettingsRounded, SubscriptionsRounded, UploadRounded, VideoLibraryRounded, WallpaperRounded, AutoAwesomeRounded
 } from '@mui/icons-material';
 
 const navItems = [
   { id: 'home', label: 'Home', icon: HomeRounded },
+  { id: 'relevant', label: 'For you', icon: AutoAwesomeRounded },
   { id: 'search', label: 'Explore', icon: ExploreRounded },
   { id: 'library', label: 'Library', icon: VideoLibraryRounded },
   { id: 'settings', label: 'Settings', icon: SettingsRounded }
@@ -66,7 +67,15 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
     const handleMediaError = () => {
       if (video.error) onError(video.error.message || `media error code ${video.error.code}`);
     };
+    let forcedStart = false;
+    const startAtBeginning = () => {
+      if (forcedStart) return;
+      forcedStart = true;
+      try { video.currentTime = 0; } catch { /* metadata may not be ready yet */ }
+      video.play().catch(() => {});
+    };
     video.addEventListener('error', handleMediaError);
+    video.addEventListener('loadedmetadata', startAtBeginning, { once: true });
     host.replaceChildren(video);
     let hls;
     let cancelled = false;
@@ -78,7 +87,7 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = src;
-      video.play().catch(() => {});
+      video.load();
       return () => {
         video.pause();
         video.removeEventListener('error', handleMediaError);
@@ -97,8 +106,7 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
       hls.loadSource(src);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.currentTime = 0;
-        video.play().catch(() => {});
+        startAtBeginning();
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal) return;
@@ -193,6 +201,7 @@ export default function App({ mode, setMode }) {
   const [feed, setFeed] = useState([]);
   const [feedPage, setFeedPage] = useState(1);
   const [feedHasMore, setFeedHasMore] = useState(false);
+  const [feedLoading, setFeedLoading] = useState(false);
   const [subscriptions, setSubscriptions] = useState([]);
   const [history, setHistory] = useState([]);
   const [files, setFiles] = useState([]);
@@ -218,10 +227,12 @@ export default function App({ mode, setMode }) {
     ]);
     setSubscriptions(subs.subscriptions); setHistory(watched.history); setFiles(stored.files);
     if (subs.subscriptions.length) {
+      setFeedLoading(true);
       try {
         const data = await api('/api/feed?page=1');
         setFeed(data.videos); setFeedPage(1); setFeedHasMore(data.hasMore);
       } catch (err) { setNotice(err.message); }
+      finally { setFeedLoading(false); }
     }
   };
 
@@ -433,6 +444,17 @@ export default function App({ mode, setMode }) {
     finally { setBackgroundBusy(false); }
   };
 
+  const relevantVideos = (() => {
+    const watchedIds = new Set(history.map((item) => item.id));
+    const channelAffinity = history.reduce((scores, item, index) => {
+      if (item.channelId) scores[item.channelId] = (scores[item.channelId] || 0) + Math.max(1, 20 - index);
+      return scores;
+    }, {});
+    return [...feed]
+      .filter((video) => !watchedIds.has(video.id))
+      .sort((a, b) => ((channelAffinity[b.channelId] || 0) - (channelAffinity[a.channelId] || 0)) || ((b.timestamp || 0) - (a.timestamp || 0)));
+  })();
+
   if (auth === null) return <Box className="splash"><CircularProgress /></Box>;
   if (!auth) return <Login onLogin={() => {
     setAuth(true);
@@ -472,9 +494,17 @@ export default function App({ mode, setMode }) {
       </> : <>
       {tab === 'home' && <>
         <Box className="page-heading"><Typography variant="h4" fontWeight={700}>Latest</Typography><Typography color="text.secondary">New videos from channels you follow.</Typography></Box>
-        {feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} />)}</Box>
+        {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Loading recent uploads…</Typography></Box>
+          : feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} />)}</Box>
           : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => setTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
         {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
+      </>}
+
+      {tab === 'relevant' && <>
+        <Box className="page-heading"><Typography variant="h4" fontWeight={700}>For you</Typography><Typography color="text.secondary">Unwatched videos from your subscriptions, ranked by what you watch.</Typography></Box>
+        {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Finding relevant videos…</Typography></Box>
+          : relevantVideos.length ? <Box className="video-grid">{relevantVideos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} />)}</Box>
+          : <EmptyState icon={AutoAwesomeRounded} title="Nothing to recommend yet" text="Watch some videos and follow channels to shape this page." action={<Button onClick={() => setTab('search')}>Explore videos</Button>} />}
       </>}
 
       {tab === 'search' && <>
