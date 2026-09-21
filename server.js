@@ -22,6 +22,8 @@ const DEFAULT_BACKGROUND_FILE = path.join(__dirname, 'client', 'public', 'mounta
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
 
 const PASSWORD = process.env.YTGRAB_PASSWORD;
+const COOKIES_FILE = process.env.YT_DLP_COOKIES ? path.resolve(__dirname, process.env.YT_DLP_COOKIES) : null;
+const NODE_MAJOR = Number.parseInt(process.versions.node.split('.')[0], 10);
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   console.error('PORT must be set to a valid port number in .env');
@@ -29,6 +31,10 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 }
 if (!PASSWORD) {
   console.error('YTGRAB_PASSWORD must be set in .env');
+  process.exit(1);
+}
+if (COOKIES_FILE && !fs.existsSync(COOKIES_FILE)) {
+  console.error(`YT_DLP_COOKIES does not exist: ${COOKIES_FILE}`);
   process.exit(1);
 }
 app.disable('x-powered-by');
@@ -41,6 +47,9 @@ const feedCache = new Map();
 const FEED_CACHE_TTL_MS = 1000 * 60 * 10;
 const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
+const ytDlpMetadataQueue = [];
+let activeYtDlpMetadata = 0;
+const MAX_YT_DLP_METADATA = 4;
 const STREAM_CACHE_VERSION = 'hls-v5';
 const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
 const MAX_ACTIVE_DOWNLOADS = 6;
@@ -289,11 +298,34 @@ function pickChannelImage(thumbnails, kind) {
     .sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)))[0]?.url || '';
 }
 
-function runYtDlp(args, timeoutMs = 30000) {
+function ytDlpArgs(args) {
+  const common = ['--remote-components', 'ejs:github'];
+  if (NODE_MAJOR >= 22) common.push('--js-runtimes', 'node');
+  if (COOKIES_FILE) common.push('--cookies', COOKIES_FILE);
+  return [...common, ...args];
+}
+
+function acquireYtDlpMetadataSlot() {
+  return new Promise((resolve) => {
+    const enter = () => {
+      activeYtDlpMetadata += 1;
+      resolve(() => {
+        activeYtDlpMetadata -= 1;
+        ytDlpMetadataQueue.shift()?.();
+      });
+    };
+    if (activeYtDlpMetadata < MAX_YT_DLP_METADATA) enter();
+    else ytDlpMetadataQueue.push(enter);
+  });
+}
+
+async function runYtDlp(args, timeoutMs = 30000) {
+  const release = await acquireYtDlpMetadataSlot();
   return new Promise((resolve, reject) => {
-    const proc = spawn('yt-dlp', args);
+    const proc = spawn('yt-dlp', ytDlpArgs(args));
     let stdout = '';
     let stderr = '';
+    let settled = false;
     const timer = setTimeout(() => proc.kill('SIGKILL'), timeoutMs);
     proc.stdout.on('data', (chunk) => {
       if (stdout.length < 8 * 1024 * 1024) stdout += chunk.toString();
@@ -301,11 +333,17 @@ function runYtDlp(args, timeoutMs = 30000) {
     });
     proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
     proc.on('error', (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      release();
       reject(error);
     });
     proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      release();
       if (code !== 0) return reject(new Error(stderr.slice(-800) || 'yt-dlp failed'));
       resolve(stdout);
     });
@@ -329,10 +367,9 @@ app.get('/api/search', expensiveLimiter, (req, res) => {
     '--flat-playlist',
     '--dump-single-json',
     '--no-warnings',
-    '--extractor-args', 'youtube:player_client=default,tv_simply',
     `ytsearch${requestedCount}:${query}`
   ];
-  const proc = spawn('yt-dlp', args);
+  const proc = spawn('yt-dlp', ytDlpArgs(args));
   let stdout = '';
   let stderr = '';
   let settled = false;
@@ -576,14 +613,13 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const format = quality === 'audio'
     ? 'ba/bestaudio/b'
     : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
-  const downloader = spawn('yt-dlp', [
+  const downloader = spawn('yt-dlp', ytDlpArgs([
     '--no-playlist', '--newline',
     '-f', format,
     '--merge-output-format', 'mkv',
-    '--extractor-args', 'youtube:player_client=default,tv_simply',
     '-o', sourceTemplate,
     `https://www.youtube.com/watch?v=${videoId}`
-  ]);
+  ]));
   let downloadError = '';
   downloader.stdout.on('data', (chunk) => {
     const match = chunk.toString().match(/(\d+(?:\.\d+)?)%/);
@@ -789,7 +825,6 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
         '-x', '--audio-format', 'best',
         '--no-playlist',
         '--newline',
-        '--extractor-args', 'youtube:player_client=default,tv_simply',
         '-o', outputTemplate,
         url
       ]
@@ -798,12 +833,11 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
         '--merge-output-format', 'mp4',
         '--no-playlist',
         '--newline',
-        '--extractor-args', 'youtube:player_client=default,tv_simply',
         '-o', outputTemplate,
         url
       ];
 
-  const proc = spawn('yt-dlp', args);
+  const proc = spawn('yt-dlp', ytDlpArgs(args));
   let stderr = '';
 
   proc.stdout.on('data', (chunk) => {

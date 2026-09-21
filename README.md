@@ -4,7 +4,7 @@ A self-hosted YouTube client I use for searching, following channels, watching v
 
 ## What you need
 
-- Node.js 18+
+- Node.js 22+
 - `yt-dlp`
 - `ffmpeg`
 
@@ -38,9 +38,13 @@ YTGRAB_PASSWORD=change-this
 YTGRAB_URL=http://127.0.0.1:3000
 TELEGRAM_BOT_TOKEN=your-bot-token
 ALLOWED_USER_IDS=your-telegram-user-id
+# Optional fallback for challenged videos:
+# YT_DLP_COOKIES=cookies.txt
 ```
 
 Use whatever password you want. `YTGRAB_URL` should be the address where you open YTgrab.
+
+Keep yt-dlp current. YTgrab allows yt-dlp to select its current supported YouTube client and enables the EJS challenge solver. Node.js 22 or newer can be used as its JavaScript runtime. If YouTube still challenges your server IP, export a Netscape-format `cookies.txt`, place it in this directory, uncomment `YT_DLP_COOKIES=cookies.txt`, and restart. Never commit or share that file.
 
 Start it:
 

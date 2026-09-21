@@ -4,4 +4,5 @@ downloads/
 data/
 client/dist/
 .env
+cookies.txt
 *.log
