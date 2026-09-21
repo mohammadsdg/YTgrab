@@ -305,6 +305,16 @@ function ytDlpArgs(args) {
   return [...common, ...args];
 }
 
+function ytDlpMediaArgs(args) {
+  return ytDlpArgs([
+    '--extractor-args', 'youtube:player_client=web_embedded,android_vr,web_safari',
+    '--user-agent', 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+    '--add-header', 'Referer:https://www.youtube.com/',
+    '--add-header', 'Origin:https://www.youtube.com',
+    ...args
+  ]);
+}
+
 function acquireYtDlpMetadataSlot() {
   return new Promise((resolve) => {
     const enter = () => {
@@ -613,7 +623,7 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const format = quality === 'audio'
     ? 'ba/bestaudio/b'
     : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
-  const downloader = spawn('yt-dlp', ytDlpArgs([
+  const downloader = spawn('yt-dlp', ytDlpMediaArgs([
     '--no-playlist', '--newline',
     '-f', format,
     '--merge-output-format', 'mkv',
@@ -837,7 +847,7 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
         url
       ];
 
-  const proc = spawn('yt-dlp', ytDlpArgs(args));
+  const proc = spawn('yt-dlp', ytDlpMediaArgs(args));
   let stderr = '';
 
   proc.stdout.on('data', (chunk) => {
