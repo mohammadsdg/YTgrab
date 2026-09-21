@@ -52,7 +52,7 @@ const channelAvatarCache = new Map();
 const ytDlpMetadataQueue = [];
 let activeYtDlpMetadata = 0;
 const MAX_YT_DLP_METADATA = 2;
-const STREAM_CACHE_VERSION = 'hls-v5';
+const STREAM_CACHE_VERSION = 'hls-v6-pipe';
 const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
 const MAX_ACTIVE_DOWNLOADS = 3;
 const MAX_ACTIVE_STREAMS = 2;
@@ -621,84 +621,83 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   if (activeStreams >= MAX_ACTIVE_STREAMS) return res.status(429).json({ error: 'The stream server is busy. Try again in a moment.' });
 
   console.log(`[stream:${videoId}:${quality}] preparing HLS stream`);
-  streamJobs[jobKey] = { status: 'downloading', progress: 0, quality };
-  const sourceTemplate = path.join(STREAM_DIR, `${videoId}-${quality}-source.%(ext)s`);
+  streamJobs[jobKey] = { status: 'converting', progress: 0, quality };
   const format = quality === 'audio'
     ? 'ba/bestaudio/b'
     : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
+  if (fs.existsSync(buildingDir)) fs.rmSync(buildingDir, { recursive: true });
+  fs.mkdirSync(buildingDir);
+  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
+  const segmentTemplate = path.join(buildingDir, 'segment-%05d.m4s');
+  const mediaArgs = quality === 'audio'
+    ? ['-vn', '-c:a', 'aac', '-b:a', '256k']
+    : [
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+        '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.1', '-tag:v', 'avc1',
+        '-force_key_frames', 'expr:gte(t,n_forced*4)',
+        '-c:a', 'aac', '-b:a', '192k'
+      ];
+
+  // yt-dlp writes the authenticated YouTube media to stdout while it arrives.
+  // ffmpeg consumes that pipe immediately and publishes four-second HLS
+  // segments, so playback does not wait for the whole source video to download.
   const downloader = spawn('yt-dlp', ytDlpMediaArgs([
-    '--no-playlist', '--newline',
+    '--no-playlist', '--quiet', '--no-warnings',
+    '--downloader', 'ffmpeg',
     '-f', format,
-    '--merge-output-format', 'mkv',
-    '-o', sourceTemplate,
+    '-o', '-',
     `https://www.youtube.com/watch?v=${videoId}`
   ]));
+  const converter = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-fflags', '+genpts', '-i', 'pipe:0',
+    ...mediaArgs,
+    '-avoid_negative_ts', 'make_zero',
+    '-f', 'hls', '-hls_time', '4', '-hls_playlist_type', 'event',
+    '-start_number', '0',
+    '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
+    '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
+    buildingPlaylist
+  ]);
+  downloader.stdout.pipe(converter.stdin);
+
   let downloadError = '';
-  downloader.stdout.on('data', (chunk) => {
-    const match = chunk.toString().match(/(\d+(?:\.\d+)?)%/);
-    if (match) streamJobs[jobKey] = { status: 'downloading', progress: Number(match[1]), quality };
-  });
+  let convertError = '';
+  let failed = false;
+  const failStream = (message) => {
+    if (failed) return;
+    failed = true;
+    downloader.kill('SIGKILL');
+    converter.kill('SIGKILL');
+    fs.rm(buildingDir, { recursive: true, force: true }, () => {});
+    streamJobs[jobKey] = { status: 'error', error: message, quality };
+  };
+
   downloader.stderr.on('data', (chunk) => { downloadError += chunk.toString(); });
-  downloader.on('error', (error) => {
-    console.error(`[stream:${videoId}:${quality}] yt-dlp could not start: ${error.message}`);
-    streamJobs[jobKey] = { status: 'error', error: `Could not start yt-dlp: ${error.message}`, quality };
+  converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
+  converter.stdin.on('error', (error) => {
+    if (error.code !== 'EPIPE') failStream(`Media pipeline failed: ${error.message}`);
   });
+  downloader.on('error', (error) => failStream(`Could not start yt-dlp: ${error.message}`));
+  converter.on('error', (error) => failStream(`Could not start ffmpeg: ${error.message}`));
   downloader.on('close', (code) => {
-    if (code !== 0) {
+    if (code !== 0 && !failed) {
       console.error(`[stream:${videoId}:${quality}] yt-dlp failed (${code}): ${downloadError.slice(-1200)}`);
-      streamJobs[jobKey] = { status: 'error', error: downloadError.slice(-800) || 'Could not prepare the video.', quality };
+      failStream(downloadError.slice(-800) || 'Could not read the YouTube media stream.');
+    }
+  });
+  converter.on('close', (code) => {
+    if (failed) return;
+    if (code !== 0 || !fs.existsSync(buildingPlaylist)) {
+      console.error(`[stream:${videoId}:${quality}] ffmpeg failed (${code}): ${convertError.slice(-1200)}`);
+      failStream(convertError.slice(-800) || 'Could not create the HLS stream.');
       return;
     }
-    const source = fs.readdirSync(STREAM_DIR).find((name) => name.startsWith(`${videoId}-${quality}-source.`) && !name.endsWith('.part'));
-    if (!source) {
-      streamJobs[jobKey] = { status: 'error', error: 'Downloaded media file was not found.', quality };
-      return;
-    }
-    const sourceFile = path.join(STREAM_DIR, source);
-    console.log(`[stream:${videoId}:${quality}] download complete; creating HLS stream`);
-    streamJobs[jobKey] = { status: 'converting', progress: 100, quality };
-    if (fs.existsSync(buildingDir)) fs.rmSync(buildingDir, { recursive: true });
-    fs.mkdirSync(buildingDir);
-    const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
-    const segmentTemplate = path.join(buildingDir, 'segment-%05d.m4s');
-    const mediaArgs = quality === 'audio'
-      ? ['-vn', '-c:a', 'aac', '-b:a', '256k']
-      : [
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
-          '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.1', '-tag:v', 'avc1',
-          '-force_key_frames', 'expr:gte(t,n_forced*6)',
-          '-c:a', 'aac', '-b:a', '192k'
-        ];
-    const converter = spawn('ffmpeg', [
-      '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
-      ...mediaArgs,
-      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod',
-      // Completed VOD playlists always begin at segment zero.
-      '-start_number', '0',
-      '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
-      '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
-      buildingPlaylist
-    ]);
-    let convertError = '';
-    converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
-    converter.on('error', (error) => {
-      console.error(`[stream:${videoId}:${quality}] ffmpeg could not start: ${error.message}`);
-      streamJobs[jobKey] = { status: 'error', error: `Could not start ffmpeg: ${error.message}`, quality };
-    });
-    converter.on('close', (convertCode) => {
-      fs.unlink(sourceFile, () => {});
-      if (convertCode !== 0 || !fs.existsSync(buildingPlaylist)) {
-        fs.rm(buildingDir, { recursive: true, force: true }, () => {});
-        console.error(`[stream:${videoId}:${quality}] ffmpeg failed (${convertCode}): ${convertError.slice(-1200)}`);
-        streamJobs[jobKey] = { status: 'error', error: convertError.slice(-800) || 'Could not create the HLS stream.', quality };
-        return;
-      }
-      if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true });
-      fs.renameSync(buildingDir, finalDir);
-      const segmentCount = fs.readdirSync(finalDir).filter((name) => name.endsWith('.m4s')).length;
-      console.log(`[stream:${videoId}:${quality}] HLS ready: ${segmentCount} segments`);
-      streamJobs[jobKey] = { status: 'done', quality, url: `/api/hls/${videoId}/${quality}/index.m3u8` };
-    });
+    if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true });
+    fs.renameSync(buildingDir, finalDir);
+    const segmentCount = fs.readdirSync(finalDir).filter((name) => name.endsWith('.m4s')).length;
+    console.log(`[stream:${videoId}:${quality}] HLS complete: ${segmentCount} segments`);
+    streamJobs[jobKey] = { status: 'done', quality, url: `/api/hls/${videoId}/${quality}/index.m3u8` };
   });
   res.status(202).json(streamJobs[jobKey]);
 });
@@ -708,7 +707,12 @@ app.get('/api/stream/:id/status', (req, res) => {
   const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
   const jobKey = `${req.params.id}:${quality}`;
   const finalPlaylist = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
+  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}-building`);
+  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
   if (fs.existsSync(finalPlaylist)) return res.json({ status: 'done', quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
+  if (fs.existsSync(buildingPlaylist) && fs.readdirSync(buildingDir).some((name) => name.endsWith('.m4s'))) {
+    return res.json({ status: 'done', streaming: true, quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
+  }
   if (streamJobs[jobKey] && streamJobs[jobKey].status !== 'done') {
     return res.json(streamJobs[jobKey]);
   }

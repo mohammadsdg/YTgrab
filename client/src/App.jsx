@@ -67,15 +67,20 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
     const handleMediaError = () => {
       if (video.error) onError(video.error.message || `media error code ${video.error.code}`);
     };
-    let forcedStart = false;
+    let startCorrected = false;
     const startAtBeginning = () => {
-      if (forcedStart) return;
-      forcedStart = true;
-      try { video.currentTime = 0; } catch { /* metadata may not be ready yet */ }
+      if (startCorrected) return;
+      try {
+        if (!video.seekable.length) return;
+        video.currentTime = video.seekable.start(0);
+        startCorrected = true;
+      } catch { /* a later readiness event retries */ }
       video.play().catch(() => {});
     };
     video.addEventListener('error', handleMediaError);
-    video.addEventListener('loadedmetadata', startAtBeginning, { once: true });
+    video.addEventListener('loadedmetadata', startAtBeginning);
+    video.addEventListener('loadeddata', startAtBeginning);
+    video.addEventListener('canplay', startAtBeginning);
     host.replaceChildren(video);
     let hls;
     let cancelled = false;
@@ -91,6 +96,9 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
       return () => {
         video.pause();
         video.removeEventListener('error', handleMediaError);
+        video.removeEventListener('loadedmetadata', startAtBeginning);
+        video.removeEventListener('loadeddata', startAtBeginning);
+        video.removeEventListener('canplay', startAtBeginning);
         player.destroy();
         host.replaceChildren();
       };
@@ -106,6 +114,7 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
       hls.loadSource(src);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        hls.startLoad(0);
         startAtBeginning();
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -125,6 +134,9 @@ function HlsPlayer({ src, onError, audioOnly = false }) {
       if (hls) hls.destroy();
       video.pause();
       video.removeEventListener('error', handleMediaError);
+      video.removeEventListener('loadedmetadata', startAtBeginning);
+      video.removeEventListener('loadeddata', startAtBeginning);
+      video.removeEventListener('canplay', startAtBeginning);
       player.destroy();
       host.replaceChildren();
     };
