@@ -16,6 +16,7 @@ const STREAM_DIR = path.join(DATA_DIR, 'streams');
 const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const DOWNLOAD_METADATA_FILE = path.join(DATA_DIR, 'downloads.json');
+const PREFERENCES_FILE = path.join(DATA_DIR, 'preferences.json');
 const CUSTOM_BACKGROUND_FILE = path.join(DATA_DIR, 'background.webp');
 const DEFAULT_BACKGROUND_FILE = path.join(__dirname, 'client', 'public', 'mountains.webp');
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
@@ -40,12 +41,16 @@ const feedCache = new Map();
 const FEED_CACHE_TTL_MS = 1000 * 60 * 10;
 const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
-const STREAM_CACHE_VERSION = 'hls-v4';
+const STREAM_CACHE_VERSION = 'hls-v5';
 const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
 const MAX_ACTIVE_DOWNLOADS = 6;
 const MAX_ACTIVE_STREAMS = 4;
 const DOWNLOAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_TOKEN_SECRET = crypto.createHash('sha256').update(`ytgrab-download:${PASSWORD}`).digest();
+
+function getPerformanceMode() {
+  return readJsonFile(PREFERENCES_FILE, { performanceMode: 'chill' }).performanceMode === 'heavy' ? 'heavy' : 'chill';
+}
 
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -403,18 +408,13 @@ app.delete('/api/subscriptions/:id', (req, res) => {
   res.json({ subscriptions });
 });
 
-app.get('/api/feed', expensiveLimiter, async (req, res) => {
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
-  if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
-  try {
-    const page = Math.max(1, Math.min(20, Number.parseInt(req.query.page, 10) || 1));
+async function buildFeedPage(subscriptions, page) {
     const subscriptionKey = subscriptions.map((channel) => channel.id).sort().join(',');
-    const cacheKey = `${subscriptionKey}:${page}`;
+    const performanceMode = getPerformanceMode();
+    const cacheKey = `${performanceMode}:${subscriptionKey}:${page}`;
     const cached = feedCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return res.json(cached.value);
-    // The first page is the latency-sensitive one. Three recent uploads per
-    // channel is enough to fill the home screen without needlessly fetching 5x.
-    const perChannel = page === 1 ? 3 : 5;
+    if (cached && cached.expires > Date.now()) return cached.value;
+    const perChannel = performanceMode === 'heavy' ? 8 : 3;
     const start = ((page - 1) * perChannel) + 1;
     const end = page * perChannel;
     const attempts = await Promise.allSettled(subscriptions.map(async (channel) => {
@@ -450,11 +450,33 @@ app.get('/api/feed', expensiveLimiter, async (req, res) => {
       throw firstError || new Error('Could not load subscriptions.');
     }
     const value = { videos, page, hasMore: videos.length > 0 };
-    feedCache.set(cacheKey, { value, expires: Date.now() + FEED_CACHE_TTL_MS });
-    res.json(value);
+    const ttl = performanceMode === 'heavy' ? 1000 * 60 * 60 : FEED_CACHE_TTL_MS;
+    feedCache.set(cacheKey, { value, expires: Date.now() + ttl });
+    return value;
+}
+
+app.get('/api/feed', expensiveLimiter, async (req, res) => {
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
+  if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
+  try {
+    const page = Math.max(1, Math.min(50, Number.parseInt(req.query.page, 10) || 1));
+    res.json(await buildFeedPage(subscriptions, page));
   } catch (error) {
     res.status(502).json({ error: error.message });
   }
+});
+
+app.get('/api/preferences', (req, res) => {
+  res.json({ performanceMode: getPerformanceMode() });
+});
+
+app.put('/api/preferences', (req, res) => {
+  const performanceMode = req.body?.performanceMode;
+  if (!['chill', 'heavy'].includes(performanceMode)) return res.status(400).json({ error: 'Invalid performance mode.' });
+  writeJsonFile(PREFERENCES_FILE, { performanceMode });
+  feedCache.clear();
+  if (performanceMode === 'heavy') warmFeedCache([2]);
+  res.json({ performanceMode });
 });
 
 app.get('/api/channels/:id', expensiveLimiter, async (req, res) => {
@@ -601,9 +623,8 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
     const converter = spawn('ffmpeg', [
       '-hide_banner', '-loglevel', 'error', '-y', '-i', sourceFile,
       ...mediaArgs,
-      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'event',
-      // Tell HLS clients to start at the beginning instead of treating the
-      // growing event playlist like a live broadcast and joining its live edge.
+      '-f', 'hls', '-hls_time', '6', '-hls_playlist_type', 'vod',
+      // Completed VOD playlists always begin at segment zero.
       '-start_number', '0',
       '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
       '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
@@ -638,12 +659,7 @@ app.get('/api/stream/:id/status', (req, res) => {
   const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
   const jobKey = `${req.params.id}:${quality}`;
   const finalPlaylist = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
-  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}-building`);
-  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
   if (fs.existsSync(finalPlaylist)) return res.json({ status: 'done', quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
-  if (fs.existsSync(buildingPlaylist) && fs.readdirSync(buildingDir).some((name) => name.endsWith('.m4s'))) {
-    return res.json({ status: 'done', streaming: true, quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
-  }
   if (streamJobs[jobKey] && streamJobs[jobKey].status !== 'done') {
     return res.json(streamJobs[jobKey]);
   }
@@ -889,4 +905,17 @@ if (fs.existsSync(CLIENT_DIST)) {
 
 app.listen(PORT, () => {
   console.log(`ytgrab listening on port ${PORT}`);
+  if (getPerformanceMode() === 'heavy') setTimeout(warmFeedCache, 1000);
 });
+
+async function warmFeedCache(pages = [1, 2]) {
+  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
+  if (!subscriptions.length) return;
+  console.log('[feed] warming heavy-mode cache');
+  try {
+    await Promise.all(pages.map((page) => buildFeedPage(subscriptions, page)));
+    console.log('[feed] heavy-mode cache ready');
+  } catch (error) {
+    console.error(`[feed] cache warm failed: ${error.message}`);
+  }
+}

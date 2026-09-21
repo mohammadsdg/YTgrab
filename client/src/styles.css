@@ -75,6 +75,8 @@ button, input { font: inherit; }
 .file-copy { min-width: 0; flex: 1; }
 .file-actions { display: flex; flex-direction: column; }
 .settings-card { max-width: 680px; margin-bottom: 12px; }
+.performance-setting { align-items: flex-start; }
+.performance-buttons { flex: 0 0 auto; }
 .telegram-orb { width: 42px; height: 42px; flex: 0 0 auto; border-radius: 50%; display: grid; place-items: center; color: #fff; background: #279ed8; transform: rotate(-12deg); }
 .channel-banner { width: 100%; max-height: 260px; aspect-ratio: 6/1; object-fit: cover; display: block; border-radius: 12px 12px 0 0; background: var(--surface-2); }
 .channel-header { min-height: 190px; padding: 26px; display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 20px 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
@@ -139,6 +141,8 @@ button, input { font: inherit; }
   .channel-header > button { width: 100%; min-height: 42px; }
   .channel-description { grid-column: 1; font-size: 13px !important; line-height: 1.75 !important; max-height: 180px; overflow-y: auto; }
   .settings-card { flex-wrap: wrap; }
+  .performance-buttons { width: 100%; }
+  .performance-buttons > button { flex: 1; }
   .subscription-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .subscription-card .MuiAvatar-root { width: 54px; height: 54px; }
   .downloads-grid { grid-template-columns: 1fr; }

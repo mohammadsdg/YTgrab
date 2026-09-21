@@ -219,13 +219,15 @@ export default function App({ mode, setMode }) {
   const [channelHasMore, setChannelHasMore] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [backgroundBusy, setBackgroundBusy] = useState(false);
+  const [performanceMode, setPerformanceMode] = useState('chill');
+  const [performanceBusy, setPerformanceBusy] = useState(false);
   const loadMoreRef = useRef(null);
 
   const loadPersonalData = async () => {
-    const [subs, watched, stored] = await Promise.all([
-      api('/api/subscriptions'), api('/api/history'), api('/api/files')
+    const [subs, watched, stored, preferences] = await Promise.all([
+      api('/api/subscriptions'), api('/api/history'), api('/api/files'), api('/api/preferences')
     ]);
-    setSubscriptions(subs.subscriptions); setHistory(watched.history); setFiles(stored.files);
+    setSubscriptions(subs.subscriptions); setHistory(watched.history); setFiles(stored.files); setPerformanceMode(preferences.performanceMode);
     if (subs.subscriptions.length) {
       setFeedLoading(true);
       try {
@@ -391,7 +393,7 @@ export default function App({ mode, setMode }) {
       finally { setLoadingMore(false); }
       return;
     }
-    if (!channelPage && tab === 'home' && feedHasMore) {
+    if (!channelPage && ['home', 'relevant'].includes(tab) && feedHasMore) {
       setLoadingMore(true);
       try {
         const next = feedPage + 1;
@@ -442,6 +444,22 @@ export default function App({ mode, setMode }) {
       setNotice('Default background restored.');
     } catch (error) { setNotice(error.message); }
     finally { setBackgroundBusy(false); }
+  };
+
+  const changePerformanceMode = async (nextMode) => {
+    if (performanceBusy || nextMode === performanceMode) return;
+    setPerformanceBusy(true);
+    try {
+      const preferences = await api('/api/preferences', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ performanceMode: nextMode })
+      });
+      setPerformanceMode(preferences.performanceMode);
+      setFeedLoading(true);
+      const data = await api('/api/feed?page=1');
+      setFeed(data.videos); setFeedPage(1); setFeedHasMore(data.hasMore);
+      setNotice(nextMode === 'heavy' ? 'Heavy mode enabled. The server is warming your feed.' : 'Chill mode enabled.');
+    } catch (error) { setNotice(error.message); }
+    finally { setFeedLoading(false); setPerformanceBusy(false); }
   };
 
   const relevantVideos = (() => {
@@ -505,6 +523,7 @@ export default function App({ mode, setMode }) {
         {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Finding relevant videos…</Typography></Box>
           : relevantVideos.length ? <Box className="video-grid">{relevantVideos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} />)}</Box>
           : <EmptyState icon={AutoAwesomeRounded} title="Nothing to recommend yet" text="Watch some videos and follow channels to shape this page." action={<Button onClick={() => setTab('search')}>Explore videos</Button>} />}
+        {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
       </>}
 
       {tab === 'search' && <>
@@ -536,6 +555,14 @@ export default function App({ mode, setMode }) {
           <DarkModeRounded />
           <Box flex={1}><Typography fontWeight={700}>Dark mode</Typography><Typography color="text.secondary" variant="body2">Use the dark interface.</Typography></Box>
           <Switch checked={mode === 'dark'} onChange={(event) => setMode(event.target.checked ? 'dark' : 'light')} />
+        </Paper>
+        <Paper className="settings-card performance-setting" elevation={0}>
+          <AutoAwesomeRounded />
+          <Box flex={1}><Typography fontWeight={700}>Server load</Typography><Typography color="text.secondary" variant="body2">Heavy mode loads more videos and warms the feed when the server starts. Chill mode uses fewer resources.</Typography></Box>
+          <Stack direction="row" spacing={1} className="performance-buttons">
+            <Button variant={performanceMode === 'chill' ? 'contained' : 'outlined'} disabled={performanceBusy} onClick={() => changePerformanceMode('chill')}>Chill</Button>
+            <Button variant={performanceMode === 'heavy' ? 'contained' : 'outlined'} disabled={performanceBusy} onClick={() => changePerformanceMode('heavy')}>Heavy</Button>
+          </Stack>
         </Paper>
         <Paper className="settings-card background-setting" elevation={0}>
           <WallpaperRounded />
