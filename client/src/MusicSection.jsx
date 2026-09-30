@@ -238,28 +238,31 @@ export default function MusicSection({ api, onDownload, onNotice }) {
   return <Box className="music-space">
     <Box className="music-ambient" />
     <header className="music-header">
-      <Box className="music-wordmark"><span><HeadphonesRounded /></span><Box><small>YTGRAB</small><strong>Music</strong></Box></Box>
+      <Box className="music-wordmark"><span><HeadphonesRounded /></span><Box><strong>YTgrab Music</strong></Box></Box>
     </header>
     <nav className="music-tabs">
       {[['discover', 'Discover', HomeRounded], ['search', 'Search', SearchRounded], ['library', 'Library', LibraryMusicRounded]].map(([id, label, Icon]) =>
-        <button key={id} className={view === id ? 'active' : ''} onClick={() => { setView(id); setActivePlaylist(null); }}><Icon /><span>{label}</span></button>)}
+        <button key={id} title={label} aria-label={label} className={view === id ? 'active' : ''} onClick={() => { setView(id); setActivePlaylist(null); }}><Icon /><span>{label}</span></button>)}
     </nav>
 
     <Box className="music-body">
       {view === 'discover' && <>
-        <section className="music-welcome"><Box><Typography className="music-kicker">LISTEN YOUR WAY</Typography><Typography variant="h2">Sound for<br /><em>right now.</em></Typography><Typography>Music from everywhere, with no noise in the way.</Typography></Box>
-          {hero && <button className="music-hero-card" onClick={() => playTrack(hero, tracks)}><MusicArtwork track={hero} /><span className="hero-shade" /><span className="hero-copy"><small>START HERE</small><strong dir="auto">{hero.title}</strong><span dir="auto">{hero.channel}</span></span><span className="hero-play"><PlayArrowRounded /></span></button>}
+        <section className="music-home-hero" style={hero ? { '--hero-image': `url("${hero.thumbnail}")` } : undefined}>
+          <Box className="music-home-hero-shade" />
+          <Box className="music-home-copy">
+            <Typography variant="h2">Home</Typography>
+            <Typography>Listen to the latest music, rediscover favorites, and find something new.</Typography>
+          </Box>
+          <Box className="mood-row">{starterMoods.map(([label, term]) => <button key={label} className="mood-chip" onClick={() => startSearch(term)}>{label}</button>)}</Box>
         </section>
 
-        <section><Box className="music-section-head"><Box><small>SET THE MOOD</small><Typography variant="h5">Pick a frequency</Typography></Box></Box>
-          <Box className="mood-row">{starterMoods.map(([label, term], index) => <button key={label} className={`mood-chip mood-${index + 1}`} onClick={() => startSearch(term)}><span>{label}</span><PlayArrowRounded /></button>)}</Box>
+        <section><Box className="music-section-head"><Box><Typography variant="h5">Quick picks</Typography><small>START A RADIO FROM A SONG</small></Box></Box>
+          {loading && !tracks.length ? <Box className="music-loader"><CircularProgress /></Box> : <Box className="music-list quick-picks">{tracks.slice(0, 8).map((track, index) => <TrackRow key={track.id} {...{ track, index, current, playing }} liked={likedIds.has(track.id)} onPlay={(item) => playTrack(item, tracks)} onLike={toggleLike} onMenu={(item, anchor) => setMenu({ track: item, anchor })} />)}</Box>}
         </section>
 
-        {library.recent.length > 0 && <section><Box className="music-section-head"><Box><small>BACK TO IT</small><Typography variant="h5">Recently played</Typography></Box></Box><Box className="album-rail">{library.recent.map((track) => <button className="album-card" key={track.id} onClick={() => playTrack(track, library.recent)}><MusicArtwork track={track} /><strong dir="auto">{track.title}</strong><span dir="auto">{track.channel}</span></button>)}</Box></section>}
+        <section><Box className="music-section-head"><Box><Typography variant="h5">Listen again</Typography><small>MUSIC YOU ALREADY KNOW</small></Box></Box><Box className="album-rail">{(library.recent.length ? library.recent : tracks.slice(0, 8)).map((track) => <button className="album-card" key={track.id} onClick={() => playTrack(track, library.recent.length ? library.recent : tracks)}><MusicArtwork track={track} /><strong dir="auto">{track.title}</strong><span dir="auto">{track.channel}</span></button>)}</Box></section>
 
-        <section><Box className="music-section-head"><Box><small>CURATED FOR YOU</small><Typography variant="h5">Today’s rotation</Typography></Box><Button onClick={() => startSearch('new music releases')}>Refresh the mix</Button></Box>
-          {loading && !tracks.length ? <Box className="music-loader"><CircularProgress /></Box> : <Box className="music-list">{tracks.slice(0, 12).map((track, index) => <TrackRow key={track.id} {...{ track, index, current, playing }} liked={likedIds.has(track.id)} onPlay={(item) => playTrack(item, tracks)} onLike={toggleLike} onMenu={(item, anchor) => setMenu({ track: item, anchor })} />)}</Box>}
-        </section>
+        <section><Box className="music-section-head"><Box><Typography variant="h5">Mixed for you</Typography><small>BASED ON WHAT YOU PLAY</small></Box><Button onClick={() => startSearch('new music releases')}>More</Button></Box><Box className="album-rail">{tracks.slice(8, 16).map((track) => <button className="album-card" key={track.id} onClick={() => playTrack(track, tracks)}><MusicArtwork track={track} /><strong dir="auto">{track.title}</strong><span dir="auto">{track.channel}</span></button>)}</Box></section>
       </>}
 
       {view === 'search' && <section className="music-search-page">
