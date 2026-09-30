@@ -425,3 +425,42 @@ button, input { font: inherit; }
   .playlist-cover,.playlist-collage { border-radius: 6px; }
   .music-player { min-height: 68px; bottom: 0; grid-template-columns: 50px minmax(0,1fr) 42px 35px; }
 }
+
+/* Keep YTgrab's chrome and purple identity around the Beatbump-style layout. */
+.app-shell.music-mode {
+  --music-accent: #a34fff;
+  --music-accent-soft: rgba(163,79,255,.18);
+}
+.music-mode > .topbar {
+  display: flex;
+  border-bottom-color: rgba(163,79,255,.22);
+  background: rgba(15,14,18,.94);
+  backdrop-filter: blur(20px);
+}
+.music-mode > .topbar .brand-mark { filter: drop-shadow(0 8px 18px rgba(163,79,255,.3)); }
+.music-mode > .topbar .github-button { color: #cdb5e9 !important; }
+.music-header { display: none; }
+.music-tabs { top: 22px; }
+.music-tabs button:hover { color: #fff; background: rgba(163,79,255,.1); }
+.music-tabs button.active { color: #fff; background: var(--music-accent-soft); box-shadow: inset 0 0 0 1px rgba(180,111,255,.22); }
+.music-home-hero-shade { background: linear-gradient(180deg,rgba(22,7,32,.24),#0d0d0f 94%),linear-gradient(90deg,rgba(22,7,32,.78),transparent 72%); }
+.music-home-hero .mood-chip { border-color: rgba(179,111,255,.2); background: rgba(28,22,33,.8); }
+.music-home-hero .mood-chip:hover { border-color: rgba(179,111,255,.52); background: rgba(74,39,97,.82); }
+.music-track.active { background: rgba(163,79,255,.08); }
+.music-track .liked,.music-player .liked { color: #bb76ff !important; }
+.equalizer i { background: #b66cff; }
+.music-artwork { color: #b875ef; background: linear-gradient(145deg,#30243a,#1c1920); }
+.playlist-cover,.playlist-collage { color: #c18bed; background: linear-gradient(145deg,#352642,#211b27); }
+.playlist-collage { background: linear-gradient(135deg,#7441a0,#2a2031); }
+.library-hero { background: linear-gradient(180deg,#432856,#17121b); }
+.music-section-head .MuiButton-root,.playlist-back { color: #cfa3f4 !important; border-color: rgba(180,111,255,.2); }
+.music-search .MuiOutlinedInput-root.Mui-focused fieldset { border-color: #a34fff !important; }
+.music-loader .MuiCircularProgress-root,.music-player .MuiCircularProgress-root { color: #a34fff; }
+.music-player-controls .main-play { color: #fff !important; background: #8f3fe0 !important; }
+.music-progress,.music-progress.Mui-disabled { color: #aa52ff !important; }
+.music-menu .MuiMenuItem-root svg { color: #c18bed; }
+
+@media (max-width: 700px) {
+  .music-tabs { z-index: 30; top: 17px; right: 62px; }
+  .music-tabs button { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
+}

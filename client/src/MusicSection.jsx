@@ -237,9 +237,6 @@ export default function MusicSection({ api, onDownload, onNotice }) {
 
   return <Box className="music-space">
     <Box className="music-ambient" />
-    <header className="music-header">
-      <Box className="music-wordmark"><span><HeadphonesRounded /></span><Box><strong>YTgrab Music</strong></Box></Box>
-    </header>
     <nav className="music-tabs">
       {[['discover', 'Discover', HomeRounded], ['search', 'Search', SearchRounded], ['library', 'Library', LibraryMusicRounded]].map(([id, label, Icon]) =>
         <button key={id} title={label} aria-label={label} className={view === id ? 'active' : ''} onClick={() => { setView(id); setActivePlaylist(null); }}><Icon /><span>{label}</span></button>)}
