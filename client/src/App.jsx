@@ -9,16 +9,14 @@ import {
   AddRounded, ArrowBackRounded, CheckRounded, CloseRounded, DarkModeRounded, DeleteOutlineRounded, DownloadRounded, ExpandMoreRounded, ExploreRounded,
   GitHub,
   HomeRounded, LogoutRounded, PersonAddRounded, PlayArrowRounded, SearchRounded,
-  SettingsRounded, SubscriptionsRounded, UploadRounded, VideoLibraryRounded, WallpaperRounded, AutoAwesomeRounded, HeadphonesRounded
+  SettingsRounded, SubscriptionsRounded, UploadRounded, VideoLibraryRounded, WallpaperRounded, AutoAwesomeRounded
 } from '@mui/icons-material';
-import MusicSection from './MusicSection';
 
 const navItems = [
   { id: 'home', label: 'Home', icon: HomeRounded },
   { id: 'relevant', label: 'For you', icon: AutoAwesomeRounded },
   { id: 'search', label: 'Explore', icon: ExploreRounded },
   { id: 'library', label: 'Library', icon: VideoLibraryRounded },
-  { id: 'music', label: 'Music', icon: HeadphonesRounded },
   { id: 'settings', label: 'Settings', icon: SettingsRounded }
 ];
 
@@ -206,7 +204,7 @@ function EmptyState({ icon: Icon, title, text, action }) {
 
 export default function App({ mode, setMode }) {
   const [auth, setAuth] = useState(null);
-  const [tab, setTab] = useState(() => window.location.hash === '#music' ? 'music' : 'home');
+  const [tab, setTab] = useState('home');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [searchPage, setSearchPage] = useState(1);
@@ -373,10 +371,7 @@ export default function App({ mode, setMode }) {
     } catch (error) { updateDownloadJob(key, { status: 'error', error: error.message }); }
   };
 
-  const chooseDownload = (video, anchor, immediateQuality) => {
-    if (immediateQuality) startDownload(video, immediateQuality);
-    else setDownloadChoice({ video, anchor });
-  };
+  const chooseDownload = (video, anchor) => setDownloadChoice({ video, anchor });
 
   const deleteFile = async (file) => {
     try {
@@ -497,7 +492,7 @@ export default function App({ mode, setMode }) {
     loadPersonalData();
   }} />;
 
-  return <Box className={`app-shell ${tab === 'music' ? 'music-mode' : ''}`}>
+  return <Box className="app-shell">
     <Box component="header" className="topbar">
       <img className="brand-mark small" src="/ytgrab-mark.png" alt="YTgrab" />
       <IconButton className="github-button" component="a" href="https://github.com/mohammadsdg/Ytgrab" target="_blank" rel="noreferrer" aria-label="Open YTgrab on GitHub"><GitHub /></IconButton>
@@ -565,8 +560,6 @@ export default function App({ mode, setMode }) {
         <Typography className="section-title">Downloads</Typography>
         <Box className="downloads-grid">{files.map((file) => <Paper className="file-item" key={file.name} elevation={0}>{file.thumbnail ? <img src={file.thumbnail} alt="" /> : <Box className="file-placeholder"><VideoLibraryRounded /></Box>}<Box className="file-copy"><Typography fontWeight={700} noWrap>{file.title || file.name}</Typography>{file.channel && <Typography variant="body2" color="text.secondary" noWrap>{file.channel}</Typography>}<Typography variant="caption" color="text.secondary">{(file.size / 1048576).toFixed(1)} MB</Typography></Box><Box className="file-actions"><IconButton href={file.url} aria-label="Save"><DownloadRounded /></IconButton><IconButton color="error" onClick={() => deleteFile(file)} aria-label="Delete"><DeleteOutlineRounded /></IconButton></Box></Paper>)}</Box>
       </>}
-
-      {tab === 'music' && <MusicSection api={api} onDownload={chooseDownload} onNotice={setNotice} />}
 
       {tab === 'settings' && <>
         <Typography variant="h4" fontWeight={700} mb={3}>Settings</Typography>
