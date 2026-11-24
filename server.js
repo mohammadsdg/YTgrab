@@ -17,6 +17,9 @@ const SUBSCRIPTIONS_FILE = path.join(DATA_DIR, 'subscriptions.json');
 const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
 const DOWNLOAD_METADATA_FILE = path.join(DATA_DIR, 'downloads.json');
 const PREFERENCES_FILE = path.join(DATA_DIR, 'preferences.json');
+const MUSIC_LIBRARY_FILE = path.join(DATA_DIR, 'music-library.json');
+const VIDEO_PLAYLISTS_FILE = path.join(DATA_DIR, 'video-playlists.json');
+const FEED_SNAPSHOTS_FILE = path.join(DATA_DIR, 'feed-snapshots.json');
 const CUSTOM_BACKGROUND_FILE = path.join(DATA_DIR, 'background.webp');
 const DEFAULT_BACKGROUND_FILE = path.join(__dirname, 'client', 'public', 'mountains.webp');
 const CLIENT_DIST = path.join(__dirname, 'client', 'dist');
@@ -46,16 +49,19 @@ const sessions = new Map(); // token -> expiry timestamp
 const searchCache = new Map();
 const SEARCH_CACHE_TTL_MS = 1000 * 60 * 5;
 const feedCache = new Map();
+const feedRequests = new Map();
 const FEED_CACHE_TTL_MS = 1000 * 60 * 10;
 const SEARCH_LIMIT = 20;
 const channelAvatarCache = new Map();
 const ytDlpMetadataQueue = [];
 let activeYtDlpMetadata = 0;
 const MAX_YT_DLP_METADATA = 2;
-const STREAM_CACHE_VERSION = 'hls-v6-pipe';
+const STREAM_CACHE_VERSION = 'hls-v7-fast-start';
 const STREAM_QUALITIES = new Set(['audio', '480', '720', '1080']);
 const MAX_ACTIVE_DOWNLOADS = 3;
 const MAX_ACTIVE_STREAMS = 2;
+const MAX_STREAM_CACHE_BYTES = Math.max(1, Number(process.env.YTGRAB_STREAM_CACHE_GB) || 8) * 1024 ** 3;
+const streamAccess = new Map();
 const DOWNLOAD_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_TOKEN_SECRET = crypto.createHash('sha256').update(`ytgrab-download:${PASSWORD}`).digest();
 
@@ -77,9 +83,17 @@ function readJsonFile(file, fallback) {
 
 function writeJsonFile(file, value) {
   const temporary = `${file}.tmp`;
+  if (fs.existsSync(file)) {
+    try { JSON.parse(fs.readFileSync(file, 'utf8')); }
+    catch { fs.copyFileSync(file, `${file}.corrupt-${Date.now()}`); }
+  }
   fs.writeFileSync(temporary, JSON.stringify(value, null, 2));
   fs.renameSync(temporary, file);
 }
+
+const storedFeedSnapshots = readJsonFile(FEED_SNAPSHOTS_FILE, {});
+const feedSnapshots = storedFeedSnapshots && typeof storedFeedSnapshots === 'object' && !Array.isArray(storedFeedSnapshots)
+  ? storedFeedSnapshots : {};
 
 app.use(helmet({
   contentSecurityPolicy: false,
@@ -266,12 +280,43 @@ app.get('/files/:name', (req, res) => {
     return res.status(401).send('This download link is invalid or has expired.');
   }
 
-  res.download(fp, name);
+  const title = readJsonFile(DOWNLOAD_METADATA_FILE, {})[name]?.title;
+  const safeTitle = typeof title === 'string' ? title.replace(/[\\/?%*:|"<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140) : '';
+  res.download(fp, safeTitle ? `${safeTitle}${path.extname(name)}` : name);
 });
 
 // in-memory job tracking: { [id]: { status, filename, error, progress } }
 const jobs = {};
 const streamJobs = {};
+
+async function pruneStreamCache() {
+  try {
+    const now = Date.now();
+    const directories = await fs.promises.readdir(STREAM_DIR, { withFileTypes: true });
+    const completed = [];
+    for (const directory of directories) {
+      if (!directory.isDirectory()) continue;
+      const location = path.join(STREAM_DIR, directory.name);
+      const stat = await fs.promises.stat(location);
+      if (directory.name.endsWith('-building')) {
+        if (now - stat.mtimeMs > 6 * 60 * 60_000) await fs.promises.rm(location, { recursive: true, force: true });
+        continue;
+      }
+      const files = await fs.promises.readdir(location);
+      let bytes = 0;
+      for (const file of files) bytes += (await fs.promises.stat(path.join(location, file))).size;
+      completed.push({ location, name: directory.name, bytes, lastUsed: Math.max(stat.mtimeMs, streamAccess.get(directory.name) || 0) });
+    }
+    let total = completed.reduce((sum, item) => sum + item.bytes, 0);
+    for (const item of completed.sort((a, b) => a.lastUsed - b.lastUsed)) {
+      if (now - item.lastUsed < 60 * 60_000) continue;
+      if (now - item.lastUsed < 7 * 24 * 60 * 60_000 && total <= MAX_STREAM_CACHE_BYTES) continue;
+      await fs.promises.rm(item.location, { recursive: true, force: true });
+      total -= item.bytes;
+      streamAccess.delete(item.name);
+    }
+  } catch (error) { console.error(`[stream] cache cleanup failed: ${error.message}`); }
+}
 
 function isValidYoutubeUrl(url) {
   try {
@@ -318,22 +363,27 @@ function ytDlpMediaArgs(args) {
   ]);
 }
 
-function acquireYtDlpMetadataSlot() {
+function acquireYtDlpMetadataSlot(priority = 'normal') {
   return new Promise((resolve) => {
     const enter = () => {
       activeYtDlpMetadata += 1;
       resolve(() => {
         activeYtDlpMetadata -= 1;
-        ytDlpMetadataQueue.shift()?.();
+        ytDlpMetadataQueue.shift()?.enter();
       });
     };
     if (activeYtDlpMetadata < MAX_YT_DLP_METADATA) enter();
-    else ytDlpMetadataQueue.push(enter);
+    else {
+      const item = { enter, priority };
+      const firstBackground = ytDlpMetadataQueue.findIndex((queued) => queued.priority === 'background');
+      if (priority === 'background' || firstBackground < 0) ytDlpMetadataQueue.push(item);
+      else ytDlpMetadataQueue.splice(firstBackground, 0, item);
+    }
   });
 }
 
-async function runYtDlp(args, timeoutMs = 30000) {
-  const release = await acquireYtDlpMetadataSlot();
+async function runYtDlp(args, timeoutMs = 30000, priority = 'normal') {
+  const release = await acquireYtDlpMetadataSlot(priority);
   return new Promise((resolve, reject) => {
     const proc = spawn('yt-dlp', ytDlpArgs(args));
     let stdout = '';
@@ -363,588 +413,30 @@ async function runYtDlp(args, timeoutMs = 30000) {
   });
 }
 
-// Search runs on this server, so the browser never has to reach YouTube.
-app.get('/api/search', expensiveLimiter, (req, res) => {
-  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-  if (!query || query.length > 200) {
-    return res.status(400).json({ error: 'Search must be between 1 and 200 characters.' });
-  }
-
-  const page = Math.max(1, Math.min(25, Number.parseInt(req.query.page, 10) || 1));
-  const requestedCount = page * SEARCH_LIMIT;
-  const cacheKey = `${query.toLocaleLowerCase()}:${page}`;
-  const cached = searchCache.get(cacheKey);
-  if (cached && cached.expires > Date.now()) return res.json({ results: cached.results });
-
-  const args = [
-    '--flat-playlist',
-    '--dump-single-json',
-    '--no-warnings',
-    `ytsearch${requestedCount}:${query}`
-  ];
-  const proc = spawn('yt-dlp', ytDlpArgs(args));
-  let stdout = '';
-  let stderr = '';
-  let settled = false;
-
-  const timer = setTimeout(() => proc.kill('SIGKILL'), 30000);
-  proc.stdout.on('data', (chunk) => {
-    // Search JSON should be small; stop a broken process from consuming memory.
-    if (stdout.length < 5 * 1024 * 1024) stdout += chunk.toString();
-    else proc.kill('SIGKILL');
-  });
-  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-  proc.on('error', (err) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    res.status(500).json({ error: `Could not start yt-dlp: ${err.message}` });
-  });
-  proc.on('close', (code) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timer);
-    if (code !== 0) {
-      return res.status(502).json({ error: stderr.slice(-800) || 'YouTube search failed.' });
-    }
-    try {
-      const data = JSON.parse(stdout);
-      const allResults = (Array.isArray(data.entries) ? data.entries : [])
-        .filter((entry) => entry && isValidVideoId(entry.id))
-        .map((entry) => ({
-          id: entry.id,
-          title: entry.title || 'Untitled video',
-          channel: entry.channel || entry.uploader || '',
-          channelId: entry.channel_id || entry.uploader_id || '',
-          duration: Number.isFinite(entry.duration) ? entry.duration : null,
-          url: `https://www.youtube.com/watch?v=${entry.id}`,
-          thumbnail: `/api/thumbnail/${entry.id}`,
-          channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : ''
-        }));
-      const results = allResults.slice((page - 1) * SEARCH_LIMIT, page * SEARCH_LIMIT);
-      searchCache.set(cacheKey, { results, expires: Date.now() + SEARCH_CACHE_TTL_MS });
-      res.json({ results, page, hasMore: results.length === SEARCH_LIMIT });
-    } catch {
-      res.status(502).json({ error: 'YouTube returned an unreadable search response.' });
-    }
-  });
+// Feature routes share the authenticated API and a small set of helpers.
+const { warmFeedCache } = require('./server/routes/browse')({
+  app, expensiveLimiter, searchCache, SEARCH_CACHE_TTL_MS, SEARCH_LIMIT,
+  isValidVideoId, runYtDlp, readJsonFile, writeJsonFile, SUBSCRIPTIONS_FILE,
+  feedCache, feedRequests, feedSnapshots, FEED_SNAPSHOTS_FILE, FEED_CACHE_TTL_MS, getPerformanceMode,
+  PREFERENCES_FILE, proxiedImageUrl, pickChannelImage, HISTORY_FILE
 });
-
-// ---------- personal client ----------
-
-app.get('/api/subscriptions', (req, res) => {
-  res.json({ subscriptions: readJsonFile(SUBSCRIPTIONS_FILE, []) });
+require('./server/routes/video-playlists')({
+  app, crypto, VIDEO_PLAYLISTS_FILE, readJsonFile, writeJsonFile, isValidVideoId
 });
-
-app.post('/api/subscriptions', (req, res) => {
-  const { id, name } = req.body || {};
-  if (typeof id !== 'string' || !/^UC[A-Za-z0-9_-]{20,30}$/.test(id) || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Invalid channel.' });
-  }
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []);
-  if (!subscriptions.some((channel) => channel.id === id)) {
-    subscriptions.push({ id, name: name.trim().slice(0, 100), avatar: `/api/channel-avatar/${id}`, followedAt: Date.now() });
-    writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
-    feedCache.clear();
-  }
-  res.json({ subscriptions });
+const musicCaches = require('./server/routes/music')({
+  app, expensiveLimiter, runYtDlp, isValidVideoId, proxiedImageUrl,
+  pickChannelImage, readJsonFile, writeJsonFile, MUSIC_LIBRARY_FILE, axios
 });
-
-app.delete('/api/subscriptions/:id', (req, res) => {
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, [])
-    .filter((channel) => channel.id !== req.params.id);
-  writeJsonFile(SUBSCRIPTIONS_FILE, subscriptions);
-  feedCache.clear();
-  res.json({ subscriptions });
+require('./server/routes/stream')({
+  app, expensiveLimiter, isValidVideoId, STREAM_QUALITIES, STREAM_CACHE_VERSION,
+  STREAM_DIR, fs, path, spawn, ytDlpMediaArgs, streamJobs, MAX_ACTIVE_STREAMS,
+  streamAccess, axios, runYtDlp, channelAvatarCache, pickChannelImage,
+  proxiedImageUrl
 });
-
-async function buildFeedPage(subscriptions, page) {
-    const subscriptionKey = subscriptions.map((channel) => channel.id).sort().join(',');
-    const performanceMode = getPerformanceMode();
-    const cacheKey = `${performanceMode}:${subscriptionKey}:${page}`;
-    const cached = feedCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.value;
-    const perChannel = performanceMode === 'heavy' ? 8 : 3;
-    const start = ((page - 1) * perChannel) + 1;
-    const end = page * perChannel;
-    const attempts = await Promise.allSettled(subscriptions.map(async (channel) => {
-      const raw = await runYtDlp([
-        '--flat-playlist', '--playlist-start', String(start), '--playlist-end', String(end), '--dump-single-json', '--no-warnings',
-        `https://www.youtube.com/channel/${channel.id}/videos`
-      ], 45000);
-      const data = JSON.parse(raw);
-      return (data.entries || []).map((entry) => ({
-        ...entry,
-        fallbackChannel: channel.name,
-        fallbackChannelId: channel.id,
-        fallbackAvatar: channel.avatar || `/api/channel-avatar/${channel.id}`
-      }));
-    }));
-    const videos = attempts
-      .filter((attempt) => attempt.status === 'fulfilled')
-      .flatMap((attempt) => attempt.value)
-      .filter((entry) => entry && isValidVideoId(entry.id))
-      .map((entry) => ({
-        id: entry.id,
-        title: entry.title || 'Untitled video',
-        channel: entry.channel || entry.uploader || entry.fallbackChannel,
-        channelId: entry.channel_id || entry.uploader_id || entry.fallbackChannelId || '',
-        duration: Number.isFinite(entry.duration) ? entry.duration : null,
-        timestamp: entry.timestamp || null,
-        thumbnail: `/api/thumbnail/${entry.id}`,
-        channelAvatar: entry.channel_id ? `/api/channel-avatar/${entry.channel_id}` : entry.fallbackAvatar
-      }))
-      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    if (!videos.length && attempts.every((attempt) => attempt.status === 'rejected')) {
-      const firstError = attempts.find((attempt) => attempt.status === 'rejected')?.reason;
-      throw firstError || new Error('Could not load subscriptions.');
-    }
-    const value = { videos, page, hasMore: videos.length > 0 };
-    const ttl = performanceMode === 'heavy' ? 1000 * 60 * 60 : FEED_CACHE_TTL_MS;
-    feedCache.set(cacheKey, { value, expires: Date.now() + ttl });
-    return value;
-}
-
-app.get('/api/feed', expensiveLimiter, async (req, res) => {
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
-  if (subscriptions.length === 0) return res.json({ videos: [], empty: true });
-  try {
-    const page = Math.max(1, Math.min(50, Number.parseInt(req.query.page, 10) || 1));
-    res.json(await buildFeedPage(subscriptions, page));
-  } catch (error) {
-    res.status(502).json({ error: error.message });
-  }
-});
-
-app.get('/api/preferences', (req, res) => {
-  res.json({ performanceMode: getPerformanceMode() });
-});
-
-app.put('/api/preferences', (req, res) => {
-  const performanceMode = req.body?.performanceMode;
-  if (!['chill', 'heavy'].includes(performanceMode)) return res.status(400).json({ error: 'Invalid performance mode.' });
-  writeJsonFile(PREFERENCES_FILE, { performanceMode });
-  feedCache.clear();
-  if (performanceMode === 'heavy') warmFeedCache([2]);
-  res.json({ performanceMode });
-});
-
-app.get('/api/channels/:id', expensiveLimiter, async (req, res) => {
-  const channelId = req.params.id;
-  if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(channelId)) {
-    return res.status(400).json({ error: 'Invalid channel ID.' });
-  }
-  try {
-    const page = Math.max(1, Math.min(50, Number.parseInt(req.query.page, 10) || 1));
-    const pageSize = 24;
-    const start = ((page - 1) * pageSize) + 1;
-    const end = page * pageSize;
-    const raw = await runYtDlp([
-      '--flat-playlist', '--playlist-start', String(start), '--playlist-end', String(end), '--dump-single-json', '--no-warnings',
-      `https://www.youtube.com/channel/${channelId}/videos`
-    ], 45000);
-    const data = JSON.parse(raw);
-    const avatarUrl = pickChannelImage(data.thumbnails, 'avatar');
-    const bannerUrl = pickChannelImage(data.thumbnails, 'banner');
-    const videos = (data.entries || [])
-      .filter((entry) => entry && isValidVideoId(entry.id))
-      .map((entry) => ({
-        id: entry.id,
-        title: entry.title || 'Untitled video',
-        channel: entry.channel || entry.uploader || data.channel || data.uploader || '',
-        channelId,
-        duration: Number.isFinite(entry.duration) ? entry.duration : null,
-        timestamp: entry.timestamp || null,
-        viewCount: Number.isFinite(entry.view_count) ? entry.view_count : null,
-        channelAvatar: proxiedImageUrl(avatarUrl),
-        thumbnail: `/api/thumbnail/${entry.id}`
-      }));
-    res.json({
-      channel: {
-        id: channelId,
-        name: data.channel || data.uploader || videos[0]?.channel || 'Channel',
-        handle: data.uploader_id || '',
-        description: data.description || '',
-        followers: Number.isFinite(data.channel_follower_count) ? data.channel_follower_count : null,
-        videoCount: Number.isFinite(data.playlist_count) ? data.playlist_count : videos.length,
-        avatar: proxiedImageUrl(avatarUrl),
-        banner: proxiedImageUrl(bannerUrl)
-      },
-      videos,
-      page,
-      hasMore: videos.length === pageSize
-    });
-  } catch (error) {
-    res.status(502).json({ error: error.message });
-  }
-});
-
-app.get('/api/history', (req, res) => {
-  res.json({ history: readJsonFile(HISTORY_FILE, []) });
-});
-
-app.post('/api/history', (req, res) => {
-  const { id, title, channel, channelId, channelAvatar } = req.body || {};
-  if (!isValidVideoId(id)) return res.status(400).json({ error: 'Invalid video.' });
-  const history = readJsonFile(HISTORY_FILE, []).filter((item) => item.id !== id);
-  history.unshift({
-    id,
-    title: String(title || 'Untitled video').slice(0, 200),
-    channel: String(channel || '').slice(0, 100),
-    channelId: typeof channelId === 'string' ? channelId : '',
-    channelAvatar: typeof channelAvatar === 'string' ? channelAvatar : (channelId ? `/api/channel-avatar/${channelId}` : ''),
-    watchedAt: Date.now(),
-    thumbnail: `/api/thumbnail/${id}`
-  });
-  writeJsonFile(HISTORY_FILE, history.slice(0, 100));
-  res.json({ ok: true });
-});
-
-app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
-  const videoId = req.params.id;
-  if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
-  const jobKey = `${videoId}:${quality}`;
-  const finalDir = path.join(STREAM_DIR, `${videoId}-${quality}-${STREAM_CACHE_VERSION}`);
-  const playlistFile = path.join(finalDir, 'index.m3u8');
-  const buildingDir = path.join(STREAM_DIR, `${videoId}-${quality}-${STREAM_CACHE_VERSION}-building`);
-  if (fs.existsSync(playlistFile)) {
-    console.log(`[stream:${videoId}:${quality}] cache hit`);
-    return res.json({ status: 'done', quality, url: `/api/hls/${videoId}/${quality}/index.m3u8` });
-  }
-  if (streamJobs[jobKey]?.status !== 'error') {
-    if (streamJobs[jobKey]) return res.json(streamJobs[jobKey]);
-  } else {
-    delete streamJobs[jobKey];
-  }
-  const activeStreams = Object.values(streamJobs).filter((job) => ['downloading', 'converting'].includes(job.status)).length;
-  if (activeStreams >= MAX_ACTIVE_STREAMS) return res.status(429).json({ error: 'The stream server is busy. Try again in a moment.' });
-
-  console.log(`[stream:${videoId}:${quality}] preparing HLS stream`);
-  streamJobs[jobKey] = { status: 'converting', progress: 0, quality };
-  const format = quality === 'audio'
-    ? 'ba/bestaudio/b'
-    : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
-  if (fs.existsSync(buildingDir)) fs.rmSync(buildingDir, { recursive: true });
-  fs.mkdirSync(buildingDir);
-  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
-  const segmentTemplate = path.join(buildingDir, 'segment-%05d.m4s');
-  const mediaArgs = quality === 'audio'
-    ? ['-vn', '-c:a', 'aac', '-b:a', '256k']
-    : [
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
-        '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-level:v', '4.1', '-tag:v', 'avc1',
-        '-force_key_frames', 'expr:gte(t,n_forced*4)',
-        '-c:a', 'aac', '-b:a', '192k'
-      ];
-
-  // yt-dlp writes the authenticated YouTube media to stdout while it arrives.
-  // ffmpeg consumes that pipe immediately and publishes four-second HLS
-  // segments, so playback does not wait for the whole source video to download.
-  const downloader = spawn('yt-dlp', ytDlpMediaArgs([
-    '--no-playlist', '--quiet', '--no-warnings',
-    '--downloader', 'ffmpeg',
-    '-f', format,
-    '-o', '-',
-    `https://www.youtube.com/watch?v=${videoId}`
-  ]));
-  const converter = spawn('ffmpeg', [
-    '-hide_banner', '-loglevel', 'error', '-y',
-    '-fflags', '+genpts', '-i', 'pipe:0',
-    ...mediaArgs,
-    '-avoid_negative_ts', 'make_zero',
-    '-f', 'hls', '-hls_time', '4', '-hls_playlist_type', 'event',
-    '-start_number', '0',
-    '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
-    '-hls_flags', 'independent_segments', '-hls_segment_filename', segmentTemplate,
-    buildingPlaylist
-  ]);
-  downloader.stdout.pipe(converter.stdin);
-
-  let downloadError = '';
-  let convertError = '';
-  let failed = false;
-  const failStream = (message) => {
-    if (failed) return;
-    failed = true;
-    downloader.kill('SIGKILL');
-    converter.kill('SIGKILL');
-    fs.rm(buildingDir, { recursive: true, force: true }, () => {});
-    streamJobs[jobKey] = { status: 'error', error: message, quality };
-  };
-
-  downloader.stderr.on('data', (chunk) => { downloadError += chunk.toString(); });
-  converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
-  converter.stdin.on('error', (error) => {
-    if (error.code !== 'EPIPE') failStream(`Media pipeline failed: ${error.message}`);
-  });
-  downloader.on('error', (error) => failStream(`Could not start yt-dlp: ${error.message}`));
-  converter.on('error', (error) => failStream(`Could not start ffmpeg: ${error.message}`));
-  downloader.on('close', (code) => {
-    if (code !== 0 && !failed) {
-      console.error(`[stream:${videoId}:${quality}] yt-dlp failed (${code}): ${downloadError.slice(-1200)}`);
-      failStream(downloadError.slice(-800) || 'Could not read the YouTube media stream.');
-    }
-  });
-  converter.on('close', (code) => {
-    if (failed) return;
-    if (code !== 0 || !fs.existsSync(buildingPlaylist)) {
-      console.error(`[stream:${videoId}:${quality}] ffmpeg failed (${code}): ${convertError.slice(-1200)}`);
-      failStream(convertError.slice(-800) || 'Could not create the HLS stream.');
-      return;
-    }
-    if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true });
-    fs.renameSync(buildingDir, finalDir);
-    const segmentCount = fs.readdirSync(finalDir).filter((name) => name.endsWith('.m4s')).length;
-    console.log(`[stream:${videoId}:${quality}] HLS complete: ${segmentCount} segments`);
-    streamJobs[jobKey] = { status: 'done', quality, url: `/api/hls/${videoId}/${quality}/index.m3u8` };
-  });
-  res.status(202).json(streamJobs[jobKey]);
-});
-
-app.get('/api/stream/:id/status', (req, res) => {
-  if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
-  const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
-  const jobKey = `${req.params.id}:${quality}`;
-  const finalPlaylist = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
-  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}-building`);
-  const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
-  if (fs.existsSync(finalPlaylist)) return res.json({ status: 'done', quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
-  if (fs.existsSync(buildingPlaylist) && fs.readdirSync(buildingDir).some((name) => name.endsWith('.m4s'))) {
-    return res.json({ status: 'done', streaming: true, quality, url: `/api/hls/${req.params.id}/${quality}/index.m3u8` });
-  }
-  if (streamJobs[jobKey] && streamJobs[jobKey].status !== 'done') {
-    return res.json(streamJobs[jobKey]);
-  }
-  res.json(streamJobs[jobKey] || { status: 'idle', quality });
-});
-
-app.get('/api/hls/:id/:quality/:file', (req, res) => {
-  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  if (!STREAM_QUALITIES.has(req.params.quality)) return res.status(400).send('Invalid quality.');
-  if (!/^(index\.m3u8|init\.mp4|segment-\d{5}\.m4s)$/.test(req.params.file)) return res.status(400).send('Invalid stream file.');
-  const finalDir = path.join(STREAM_DIR, `${req.params.id}-${req.params.quality}-${STREAM_CACHE_VERSION}`);
-  const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${req.params.quality}-${STREAM_CACHE_VERSION}-building`);
-  const activeDir = fs.existsSync(path.join(finalDir, req.params.file)) ? finalDir : buildingDir;
-  const file = path.join(activeDir, req.params.file);
-  if (!fs.existsSync(file)) return res.status(404).send('Stream file not found.');
-  if (req.params.file.endsWith('.m3u8')) {
-    // An EVENT playlist is playable while ffmpeg is still appending segments,
-    // but many clients otherwise join at its live edge. EXT-X-START makes the
-    // intended VOD-like behavior explicit, including on native-HLS browsers.
-    const playlist = fs.readFileSync(file, 'utf8');
-    const withStart = playlist.includes('#EXT-X-START:')
-      ? playlist
-      : playlist.replace('#EXTM3U', '#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES');
-    res.setHeader('Cache-Control', 'no-store');
-    res.type('application/vnd.apple.mpegurl').send(withStart);
-    return;
-  }
-  res.setHeader('Cache-Control', 'private, max-age=86400');
-  res.type('video/mp4');
-  res.sendFile(file);
-});
-
-app.get('/api/image', async (req, res) => {
-  try {
-    const url = new URL(String(req.query.url || ''));
-    const host = url.hostname.toLowerCase();
-    const allowed = host === 'yt3.ggpht.com' || host === 'yt3.googleusercontent.com' || host.endsWith('.ytimg.com');
-    if (url.protocol !== 'https:' || !allowed) return res.status(400).send('Invalid image URL.');
-    const upstream = await axios.get(url.toString(), { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 });
-    if (!String(upstream.headers['content-type'] || '').startsWith('image/')) return res.status(502).send('Invalid image response.');
-    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.send(Buffer.from(upstream.data));
-  } catch {
-    if (!res.headersSent) res.status(502).send('Image unavailable.');
-  }
-});
-
-// Fixed upstream host + validated video ID avoids turning this into an open proxy.
-app.get('/api/thumbnail/:id', async (req, res) => {
-  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid video ID.');
-  try {
-    const upstream = await axios.get(
-      `https://i.ytimg.com/vi/${req.params.id}/hqdefault.jpg`,
-      { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 }
-    );
-    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.send(Buffer.from(upstream.data));
-  } catch {
-    if (!res.headersSent) res.status(502).send('Thumbnail unavailable.');
-  }
-});
-
-app.get('/api/channel-avatar/:id', async (req, res) => {
-  const channelId = req.params.id;
-  if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(channelId)) return res.status(400).send('Invalid channel ID.');
-  try {
-    let imageUrl = channelAvatarCache.get(channelId);
-    if (!imageUrl) {
-      const raw = await runYtDlp([
-        '--flat-playlist', '--playlist-end', '1', '--dump-single-json', '--no-warnings',
-        `https://www.youtube.com/channel/${channelId}/videos`
-      ], 30000);
-      imageUrl = pickChannelImage(JSON.parse(raw).thumbnails, 'avatar');
-      if (!imageUrl) return res.status(404).send('Avatar unavailable.');
-      channelAvatarCache.set(channelId, imageUrl);
-    }
-    const upstream = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 });
-    if (!String(upstream.headers['content-type'] || '').startsWith('image/')) return res.status(502).send('Invalid image response.');
-    res.setHeader('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
-    res.setHeader('Cache-Control', 'private, max-age=604800');
-    res.send(Buffer.from(upstream.data));
-  } catch {
-    if (!res.headersSent) res.status(502).send('Avatar unavailable.');
-  }
-});
-
-// Maps a quality choice from the GUI to a yt-dlp format selector.
-// Using height<=N with a fallback chain so it still works if that exact
-// resolution isn't available for a given video.
-const QUALITY_FORMATS = {
-  best: 'bestvideo+bestaudio/best',
-  '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
-  '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
-  '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-  '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-  '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-  '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-  audio: 'bestaudio'
-};
-
-app.post('/api/download', expensiveLimiter, (req, res) => {
-  const { url, quality, video } = req.body || {};
-  if (!url || !isValidYoutubeUrl(url)) {
-    return res.status(400).json({ error: 'That does not look like a valid YouTube URL.' });
-  }
-  if (!Object.prototype.hasOwnProperty.call(QUALITY_FORMATS, quality)) {
-    return res.status(400).json({ error: 'Invalid download quality.' });
-  }
-  const activeDownloads = Object.values(jobs).filter((job) => job.status === 'processing').length;
-  if (activeDownloads >= MAX_ACTIVE_DOWNLOADS) {
-    return res.status(429).json({ error: 'Six downloads are already active. Let one finish first.' });
-  }
-
-  const format = QUALITY_FORMATS[quality] || QUALITY_FORMATS.best;
-  const audioOnly = quality === 'audio';
-
-  const id = crypto.randomBytes(8).toString('hex');
-  jobs[id] = { status: 'processing', progress: 0, video };
-
-  const outputTemplate = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
-
-  const args = audioOnly
-    ? [
-        '-f', format,
-        '-x', '--audio-format', 'best',
-        '--no-playlist',
-        '--newline',
-        '-o', outputTemplate,
-        url
-      ]
-    : [
-        '-f', format,
-        '--merge-output-format', 'mp4',
-        '--no-playlist',
-        '--newline',
-        '-o', outputTemplate,
-        url
-      ];
-
-  const proc = spawn('yt-dlp', ytDlpMediaArgs(args));
-  let stderr = '';
-
-  proc.stdout.on('data', (chunk) => {
-    const text = chunk.toString();
-    const match = text.match(/(\d+(?:\.\d+)?)%/);
-    if (match) jobs[id].progress = parseFloat(match[1]);
-  });
-
-  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-
-  proc.on('error', (err) => {
-    jobs[id] = { status: 'error', error: `Could not start yt-dlp: ${err.message}` };
-  });
-
-  proc.on('close', (code) => {
-    if (code !== 0) {
-      jobs[id] = { status: 'error', error: stderr.slice(-800) || 'yt-dlp failed.' };
-      return;
-    }
-    const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.startsWith(id + '.'));
-    if (files.length === 0) {
-      jobs[id] = { status: 'error', error: 'yt-dlp finished but produced no file.' };
-      return;
-    }
-    jobs[id] = { status: 'done', filename: files[0], video };
-    const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
-    metadata[files[0]] = {
-      id: isValidVideoId(video?.id) ? video.id : '',
-      title: String(video?.title || files[0]).slice(0, 200),
-      channel: String(video?.channel || '').slice(0, 100),
-      channelId: typeof video?.channelId === 'string' ? video.channelId : '',
-      downloadedAt: Date.now()
-    };
-    writeJsonFile(DOWNLOAD_METADATA_FILE, metadata);
-    // Files now stick around until you delete them from the "on server"
-    // list in the GUI, rather than auto-expiring.
-  });
-
-  res.json({ id });
-});
-
-app.get('/api/status/:id', (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) return res.status(404).json({ error: 'Unknown job id (it may have expired).' });
-  if (job.status === 'done') {
-    const token = makeFileToken(job.filename);
-    return res.json({
-      status: 'done',
-      url: `/files/${encodeURIComponent(job.filename)}?token=${token}`,
-      filename: job.filename
-    });
-  }
-  res.json(job);
-});
-
-// ---------- file manager ----------
-
-app.get('/api/files', (req, res) => {
-  const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
-  const files = fs.readdirSync(DOWNLOAD_DIR)
-    .filter((f) => !f.startsWith('.'))
-    .map((f) => {
-      const stat = fs.statSync(path.join(DOWNLOAD_DIR, f));
-      const token = makeFileToken(f);
-      return {
-        name: f,
-        size: stat.size,
-        mtime: stat.mtimeMs,
-        url: `/files/${encodeURIComponent(f)}?token=${token}`,
-        ...(metadata[f] || {}),
-        thumbnail: metadata[f]?.id ? `/api/thumbnail/${metadata[f].id}` : ''
-      };
-    })
-    .sort((a, b) => b.mtime - a.mtime);
-  res.json({ files });
-});
-
-app.delete('/api/files/:name', (req, res) => {
-  const name = path.basename(req.params.name); // block path traversal
-  const fp = path.join(DOWNLOAD_DIR, name);
-  if (path.dirname(fp) !== DOWNLOAD_DIR) {
-    return res.status(400).json({ error: 'Invalid filename.' });
-  }
-  fs.unlink(fp, (err) => {
-    if (err) return res.status(404).json({ error: 'File not found.' });
-    const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
-    delete metadata[name];
-    writeJsonFile(DOWNLOAD_METADATA_FILE, metadata);
-    res.json({ ok: true });
-  });
+require('./server/routes/downloads')({
+  app, expensiveLimiter, jobs, MAX_ACTIVE_DOWNLOADS, crypto, path, DOWNLOAD_DIR,
+  spawn, ytDlpMediaArgs, isValidYoutubeUrl, isValidVideoId, readJsonFile,
+  writeJsonFile, DOWNLOAD_METADATA_FILE, makeFileToken, fs
 });
 
 if (fs.existsSync(CLIENT_DIST)) {
@@ -957,16 +449,17 @@ if (fs.existsSync(CLIENT_DIST)) {
 app.listen(PORT, () => {
   console.log(`ytgrab listening on port ${PORT}`);
   if (getPerformanceMode() === 'heavy') setTimeout(warmFeedCache, 1000);
+  setTimeout(pruneStreamCache, 10_000);
 });
 
-async function warmFeedCache(pages = [1, 2]) {
-  const subscriptions = readJsonFile(SUBSCRIPTIONS_FILE, []).slice(0, 40);
-  if (!subscriptions.length) return;
-  console.log('[feed] warming heavy-mode cache');
-  try {
-    await Promise.all(pages.map((page) => buildFeedPage(subscriptions, page)));
-    console.log('[feed] heavy-mode cache ready');
-  } catch (error) {
-    console.error(`[feed] cache warm failed: ${error.message}`);
+setInterval(() => {
+  const now = Date.now();
+  const cutoff = now - 24 * 60 * 60_000;
+  for (const [id, job] of Object.entries(jobs)) if (job.finishedAt && job.finishedAt < cutoff) delete jobs[id];
+  for (const [id, job] of Object.entries(streamJobs)) if (job.finishedAt && job.finishedAt < cutoff) delete streamJobs[id];
+  for (const cache of [searchCache, feedCache, ...musicCaches]) {
+    for (const [key, value] of cache) if (value.expires < now) cache.delete(key);
   }
-}
+  for (const [name, used] of streamAccess) if (used < cutoff) streamAccess.delete(name);
+  pruneStreamCache();
+}, 60 * 60_000);

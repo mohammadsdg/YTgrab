@@ -221,6 +221,9 @@ bot.on('callback_query', async (query) => {
     while (!done) {
       await new Promise((r) => setTimeout(r, 2000));
       const statusRes = await api('get', `/api/status/${jobId}`);
+      if (statusRes.status !== 200) {
+        throw new Error(statusRes.data?.error || 'Download status is unavailable. The server may have restarted.');
+      }
       const data = statusRes.data;
 
       if (data.status === 'processing') {
