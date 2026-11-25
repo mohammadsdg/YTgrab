@@ -1,24 +1,14 @@
+const { mediaSelectionArgs, mediaError } = require('../media-formats');
+const DOWNLOAD_QUALITIES = new Set(['best', '2160', '1440', '1080', '720', '480', '360', 'audio']);
+
 module.exports = function registerDownloadRoutes({ app, expensiveLimiter, jobs, MAX_ACTIVE_DOWNLOADS, crypto, path, DOWNLOAD_DIR, spawn, ytDlpMediaArgs, isValidYoutubeUrl, isValidVideoId, readJsonFile, writeJsonFile, DOWNLOAD_METADATA_FILE, makeFileToken, fs }) {
-// Maps a quality choice from the GUI to a yt-dlp format selector.
-// Using height<=N with a fallback chain so it still works if that exact
-// resolution isn't available for a given video.
-const QUALITY_FORMATS = {
-  best: 'bestvideo+bestaudio/best',
-  '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
-  '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
-  '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-  '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-  '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-  '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-  audio: 'bestaudio'
-};
 
 app.post('/api/download', expensiveLimiter, (req, res) => {
   const { url, quality, video } = req.body || {};
   if (!url || !isValidYoutubeUrl(url)) {
     return res.status(400).json({ error: 'That does not look like a valid YouTube URL.' });
   }
-  if (!Object.prototype.hasOwnProperty.call(QUALITY_FORMATS, quality)) {
+  if (!DOWNLOAD_QUALITIES.has(quality)) {
     return res.status(400).json({ error: 'Invalid download quality.' });
   }
   const activeDownloads = Object.values(jobs).filter((job) => job.status === 'processing').length;
@@ -26,7 +16,6 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
     return res.status(429).json({ error: `${MAX_ACTIVE_DOWNLOADS} downloads are already active. Let one finish first.` });
   }
 
-  const format = QUALITY_FORMATS[quality] || QUALITY_FORMATS.best;
   const audioOnly = quality === 'audio';
 
   const id = crypto.randomBytes(8).toString('hex');
@@ -36,7 +25,7 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
 
   const args = audioOnly
     ? [
-        '-f', format,
+        ...mediaSelectionArgs(quality),
         '-x', '--audio-format', 'best',
         '--no-playlist',
         '--newline',
@@ -44,7 +33,7 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
         url
       ]
     : [
-        '-f', format,
+        ...mediaSelectionArgs(quality),
         '--merge-output-format', 'mp4',
         '--no-playlist',
         '--newline',
@@ -69,7 +58,7 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
 
   proc.on('close', (code) => {
     if (code !== 0) {
-      jobs[id] = { status: 'error', error: stderr.slice(-800) || 'yt-dlp failed.', finishedAt: Date.now() };
+      jobs[id] = { status: 'error', error: mediaError(stderr), finishedAt: Date.now() };
       return;
     }
     const files = fs.readdirSync(DOWNLOAD_DIR).filter(f => f.startsWith(id + '.'));

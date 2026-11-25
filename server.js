@@ -29,6 +29,7 @@ const COOKIES_FILE = process.env.YT_DLP_COOKIES ? path.resolve(__dirname, proces
 const NODE_MAJOR = Number.parseInt(process.versions.node.split('.')[0], 10);
 const YT_DLP_USER_AGENT = process.env.YT_DLP_USER_AGENT?.trim();
 const YT_DLP_PROXY = process.env.YT_DLP_PROXY?.trim();
+const YT_DLP_PLAYER_CLIENT = process.env.YT_DLP_PLAYER_CLIENT?.trim();
 
 if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   console.error('PORT must be set to a valid port number in .env');
@@ -355,12 +356,9 @@ function ytDlpArgs(args) {
 }
 
 function ytDlpMediaArgs(args) {
-  return ytDlpArgs([
-    // Current yt-dlp guidance recommends mweb with an installed PO-token
-    // provider. The provider supplies a fresh video-bound token automatically.
-    '--extractor-args', 'youtube:player_client=mweb',
-    ...args
-  ]);
+  return ytDlpArgs(YT_DLP_PLAYER_CLIENT
+    ? ['--extractor-args', `youtube:player_client=${YT_DLP_PLAYER_CLIENT}`, ...args]
+    : args);
 }
 
 function acquireYtDlpMetadataSlot(priority = 'normal') {

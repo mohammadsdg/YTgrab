@@ -1,3 +1,5 @@
+const { mediaSelectionArgs, mediaError } = require('../media-formats');
+
 module.exports = function registerStreamRoutes({ app, expensiveLimiter, isValidVideoId, STREAM_QUALITIES, STREAM_CACHE_VERSION, STREAM_DIR, fs, path, spawn, ytDlpMediaArgs, streamJobs, MAX_ACTIVE_STREAMS, streamAccess, axios, runYtDlp, channelAvatarCache, pickChannelImage, proxiedImageUrl }) {
 app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const videoId = req.params.id;
@@ -22,9 +24,6 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
 
   console.log(`[stream:${videoId}:${quality}] preparing HLS stream`);
   streamJobs[jobKey] = { status: 'converting', progress: 0, quality };
-  const format = quality === 'audio'
-    ? 'ba/bestaudio/b'
-    : `bv*[height<=${quality}]+ba/b[height<=${quality}]/b`;
   if (fs.existsSync(buildingDir)) fs.rmSync(buildingDir, { recursive: true });
   fs.mkdirSync(buildingDir);
   const buildingPlaylist = path.join(buildingDir, 'index.m3u8');
@@ -44,7 +43,7 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const downloader = spawn('yt-dlp', ytDlpMediaArgs([
     '--no-playlist', '--quiet', '--no-warnings',
     '--downloader', 'ffmpeg',
-    '-f', format,
+    ...mediaSelectionArgs(quality),
     '-o', '-',
     `https://www.youtube.com/watch?v=${videoId}`
   ]));
@@ -83,7 +82,7 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   downloader.on('close', (code) => {
     if (code !== 0 && !failed) {
       console.error(`[stream:${videoId}:${quality}] yt-dlp failed (${code}): ${downloadError.slice(-1200)}`);
-      failStream(downloadError.slice(-800) || 'Could not read the YouTube media stream.');
+      failStream(mediaError(downloadError));
     }
   });
   converter.on('close', (code) => {

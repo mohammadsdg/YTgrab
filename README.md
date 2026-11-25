@@ -49,13 +49,14 @@ Open `http://127.0.0.1:3000` unless you changed the port. To run the Telegram bo
 | `YT_DLP_COOKIES` | Path to a Netscape-format YouTube cookie file, recommended on hosted servers. |
 | `YT_DLP_USER_AGENT` | Browser User-Agent from the session that exported those cookies, if needed. |
 | `YT_DLP_PROXY` | Optional outbound proxy for yt-dlp. |
+| `YT_DLP_PLAYER_CLIENT` | Optional yt-dlp YouTube player client override; use `mweb` with a working PO-token provider. |
 | `YTGRAB_STREAM_CACHE_GB` | HLS cache cleanup target in GB; defaults to 8. |
 
 See [.env.example](.env.example) for the template.
 
 ## A note on hosted servers
 
-YouTube often challenges datacenter IP addresses. YTgrab uses yt-dlp's `mweb` client for media and supports cookies and a PO-token provider. On a hosted server, configure both before relying on playback and downloads.
+YouTube often challenges datacenter IP addresses. YTgrab uses yt-dlp's default clients for media, with optional cookies and a PO-token provider. If you have a working provider, set `YT_DLP_PLAYER_CLIENT=mweb` to use it. On a hosted server, configure cookies and a provider before relying on playback and downloads.
 
 <details>
 <summary>Set up the PO-token provider and YouTube cookies</summary>
