@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
-  AddRounded, ArrowBackRounded, DownloadRounded, FavoriteBorderRounded, FavoriteRounded,
-  HeadphonesRounded, LibraryMusicRounded, LyricsRounded, MoreHorizRounded, PauseRounded,
-  PlayArrowRounded, SearchRounded, SkipNextRounded, SkipPreviousRounded
+  AddRounded, ArrowBackRounded, ArrowDownwardRounded, ArrowUpwardRounded, DownloadRounded,
+  EditRounded, FavoriteBorderRounded, FavoriteRounded, HeadphonesRounded, LibraryMusicRounded,
+  MoreHorizRounded, PlayArrowRounded, PlaylistPlayRounded, SearchRounded, ShuffleRounded
 } from '@mui/icons-material';
 import {
   Avatar, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
-  IconButton, InputAdornment, Menu, MenuItem, Paper, Slider, TextField, Typography
+  IconButton, InputAdornment, Menu, MenuItem, Paper, TextField, Typography
 } from '@mui/material';
+import MusicPlayer from './music/MusicPlayer';
+import useMusicPlayback from './music/useMusicPlayback';
 
 const emptyLibrary = { liked: [], artists: [], playlists: [], recent: [] };
 const moods = [
@@ -21,8 +24,8 @@ function time(value) {
   return `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}`;
 }
 
-function SongRow({ song, index, current, playing, liked, onPlay, onArtist, onLike, onDownload, onMenu }) {
-  return <Box className={`music-song ${current?.id === song.id ? 'selected' : ''}`}>
+function SongRow({ song, index, current, playing, liked, onPlay, onArtist, onLike, onDownload, onMenu, onMove, count }) {
+  return <Box className={`music-song ${current?.id === song.id ? 'selected' : ''} ${onMove ? 'reorderable' : ''}`}>
     <button className="music-song-main" onClick={() => onPlay(song)} aria-label={`Play ${song.title}`}>
       <span className="music-song-number">{current?.id === song.id && playing ? '♫' : index + 1}</span>
       <img src={song.thumbnail} alt="" loading="lazy" />
@@ -33,6 +36,7 @@ function SongRow({ song, index, current, playing, liked, onPlay, onArtist, onLik
     <IconButton size="small" color={liked ? 'primary' : 'default'} onClick={() => onLike(song)} aria-label={liked ? 'Unlike song' : 'Like song'}>{liked ? <FavoriteRounded /> : <FavoriteBorderRounded />}</IconButton>
     <IconButton size="small" onClick={() => onDownload(song)} aria-label="Download best audio" title="Download best audio"><DownloadRounded /></IconButton>
     <IconButton size="small" onClick={(event) => onMenu(song, event.currentTarget)} aria-label="Add to playlist"><MoreHorizRounded /></IconButton>
+    {onMove && <Box className="music-song-order"><IconButton size="small" disabled={index === 0} onClick={() => onMove(index, index - 1)} aria-label={`Move ${song.title} up`}><ArrowUpwardRounded /></IconButton><IconButton size="small" disabled={index === count - 1} onClick={() => onMove(index, index + 1)} aria-label={`Move ${song.title} down`}><ArrowDownwardRounded /></IconButton></Box>}
   </Box>;
 }
 
@@ -55,23 +59,10 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
   const [selectedList, setSelectedList] = useState(null);
   const [playlistOpen, setPlaylistOpen] = useState(false);
   const [playlistName, setPlaylistName] = useState('');
+  const [pendingPlaylistSong, setPendingPlaylistSong] = useState(null);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameName, setRenameName] = useState('');
   const [menu, setMenu] = useState(null);
-  const [queue, setQueue] = useState([]);
-  const [current, setCurrent] = useState(null);
-  const [stream, setStream] = useState('');
-  const [streamState, setStreamState] = useState('idle');
-  const [playing, setPlaying] = useState(false);
-  const playingRef = useRef(false);
-  playingRef.current = playing;
-  const [elapsed, setElapsed] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [lyricsOpen, setLyricsOpen] = useState(false);
-  const [lyrics, setLyrics] = useState(null);
-  const lyricsCache = useRef(new Map());
-  const audioRef = useRef(null);
-  const hlsRef = useRef(null);
-  const requestRef = useRef(0);
-
   useEffect(() => {
     if (!active || loaded) return;
     api('/api/music/library').then(({ library: saved }) => {
@@ -91,13 +82,6 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
       .catch((error) => onNotice(error.message))
       .finally(() => setHomeLoading(false));
   }, [active, loaded, homeLoaded]);
-
-  useEffect(() => {
-    if (active) return;
-    ++requestRef.current;
-    audioRef.current?.pause();
-    setPlaying(false);
-  }, [active]);
 
   const updateLibrary = (change) => {
     const next = change(libraryRef.current);
@@ -139,7 +123,10 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
     setView('album');
     setAlbumPage({ album, songs: [] });
     setAlbumLoading(true);
-    try { setAlbumPage(await api(`/api/music/albums/${encodeURIComponent(album.id)}`)); }
+    try {
+      const data = await api(`/api/music/albums/${encodeURIComponent(album.id)}`);
+      setAlbumPage({ ...data, songs: data.songs.map((song) => ({ ...song, album: song.album || data.album.title })) });
+    }
     catch (error) { onNotice(error.message); }
     finally { setAlbumLoading(false); }
   };
@@ -156,109 +143,28 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
       : [song, ...old.liked]
   }));
 
-  const prepare = async (song) => {
-    const request = ++requestRef.current;
-    setStream(''); setPlaying(false); setStreamState('preparing');
-    try {
-      let state = await api(`/api/stream/${song.id}/prepare?quality=audio`, { method: 'POST' });
-      while (!['done', 'error'].includes(state.status)) {
-        await new Promise((resolve) => setTimeout(resolve, 900));
-        if (requestRef.current !== request) return;
-        state = await api(`/api/stream/${song.id}/status?quality=audio`);
-      }
-      if (requestRef.current !== request) return;
-      if (state.status === 'error') throw new Error(state.error || 'Could not stream this song.');
-      setStream(state.url);
-      setStreamState('ready');
-      setPlaying(true);
-    } catch (error) {
-      if (requestRef.current !== request) return;
-      setStreamState('error');
-      onNotice(error.message);
-    }
-  };
-
-  const playSong = (song, source) => {
-    if (current?.id === song.id && stream) { setPlaying((value) => !value); return; }
-    setQueue(source?.length ? source : [song]);
-    setCurrent(song); setElapsed(0); setDuration(song.duration || 0);
-    setLyricsOpen(false); setLyrics(null);
-    updateLibrary((old) => ({ ...old, recent: [song, ...old.recent.filter((item) => item.id !== song.id)].slice(0, 30) }));
-    prepare(song);
-  };
-
-  const step = (direction) => {
-    if (!current || !queue.length) return;
-    const at = queue.findIndex((item) => item.id === current.id);
-    const next = queue[(at + direction + queue.length) % queue.length];
-    if (next) playSong(next, queue);
-  };
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !stream) return undefined;
-    let cancelled = false;
-    const fail = (message) => { setPlaying(false); setStreamState('error'); onNotice(message); };
-    const startWhenReady = () => {
-      if (playingRef.current && active) audio.play().catch(() => setPlaying(false));
-    };
-    if (audio.canPlayType('application/vnd.apple.mpegurl')) {
-      audio.src = stream;
-      audio.addEventListener('canplay', startWhenReady);
-      audio.load();
-    } else {
-      import('hls.js').then(({ default: Hls }) => {
-        if (cancelled) return;
-        if (!Hls.isSupported()) return fail('Audio playback is not supported here.');
-        const hls = new Hls({ enableWorker: true, lowLatencyMode: false, startPosition: 0 });
-        hlsRef.current = hls;
-        hls.loadSource(stream);
-        hls.attachMedia(audio);
-        hls.on(Hls.Events.MANIFEST_PARSED, startWhenReady);
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal) return;
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-          else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-          else fail(`Audio playback failed: ${data.details}`);
-        });
-      }).catch((error) => fail(error.message));
-    }
-    return () => {
-      cancelled = true;
-      hlsRef.current?.destroy(); hlsRef.current = null;
-      audio.removeEventListener('canplay', startWhenReady);
-      audio.pause(); audio.removeAttribute('src'); audio.load();
-    };
-  }, [stream]);
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !stream) return;
-    if (playing && active && audio.readyState >= 2) audio.play().catch(() => setPlaying(false));
-    else audio.pause();
-  }, [playing, stream, active]);
-
-  const showLyrics = async () => {
-    if (!current) return;
-    setLyricsOpen(true);
-    if (lyricsCache.current.has(current.id)) return setLyrics(lyricsCache.current.get(current.id));
-    setLyrics(null);
-    try {
-      const params = new URLSearchParams({ title: current.title, artist: current.artist, duration: String(current.duration || '') });
-      const data = await api(`/api/music/lyrics/${current.id}?${params}`);
-      lyricsCache.current.set(current.id, data);
-      setLyrics(data);
-    } catch (error) { setLyrics({ available: false, error: error.message }); }
-  };
+  const {
+    queue, current, streamState, playing, setPlaying, elapsed, setElapsed,
+    duration, setDuration, shuffle, repeat, rate, setRate,
+    volume, setVolume, muted, setMuted, sleep, lyrics, lyricsLoading, lyricsOffsets,
+    setLyricsOffsets, audioRef, prepare, playSong, playCollection, toggleShuffle, cycleRepeat,
+    playQueue, step, moveQueue, removeQueue, showLyrics, seek, closePlayer,
+    setSleepTimer
+  } = useMusicPlayback({ api, active, onNotice, onPlayed: (song) => updateLibrary((old) => ({
+    ...old, recent: [song, ...old.recent.filter((item) => item.id !== song.id)].slice(0, 30)
+  })) });
 
   const createPlaylist = () => {
     const name = playlistName.trim();
     if (!name) return;
-    updateLibrary((old) => ({ ...old, playlists: [...old.playlists, { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, name, tracks: [] }] }));
-    setPlaylistName(''); setPlaylistOpen(false);
+    updateLibrary((old) => ({ ...old, playlists: [...old.playlists, { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, name, tracks: pendingPlaylistSong ? [pendingPlaylistSong] : [] }] }));
+    setPlaylistName(''); setPlaylistOpen(false); setPendingPlaylistSong(null);
   };
 
   const addToPlaylist = (id, song) => {
+    if (libraryRef.current.playlists.find((list) => list.id === id)?.tracks.some((item) => item.id === song.id)) {
+      setMenu(null); onNotice('Already in this playlist.'); return;
+    }
     updateLibrary((old) => ({ ...old, playlists: old.playlists.map((list) => list.id === id && !list.tracks.some((item) => item.id === song.id)
       ? { ...list, tracks: [...list.tracks, song] } : list) }));
     setMenu(null);
@@ -277,11 +183,29 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
     setSelectedList(null);
   };
 
+  const renamePlaylist = () => {
+    const name = renameName.trim();
+    if (!name || !selectedList || selectedList === 'liked') return;
+    updateLibrary((old) => ({ ...old, playlists: old.playlists.map((list) => list.id === selectedList ? { ...list, name } : list) }));
+    setRenameOpen(false);
+  };
+
+  const movePlaylistTrack = (from, to) => {
+    updateLibrary((old) => ({ ...old, playlists: old.playlists.map((list) => {
+      if (list.id !== selectedList || to < 0 || to >= list.tracks.length) return list;
+      const tracks = [...list.tracks];
+      tracks.splice(to, 0, tracks.splice(from, 1)[0]);
+      return { ...list, tracks };
+    }) }));
+  };
+
+
   const currentList = selectedList === 'liked' ? library.liked : library.playlists.find((list) => list.id === selectedList)?.tracks || [];
-  const row = (song, index, source) => <SongRow key={song.id} {...{ song, index, current, playing }}
+  const row = (song, index, source, reorder = false) => <SongRow key={song.id} {...{ song, index, current, playing }}
     liked={library.liked.some((item) => item.id === song.id)} onPlay={(item) => playSong(item, source)}
     onArtist={openArtist} onLike={toggleLike} onDownload={onDownload}
-    onMenu={(item, anchor) => setMenu({ song: item, anchor })} />;
+    onMenu={(item, anchor) => setMenu({ song: item, anchor })}
+    onMove={reorder ? movePlaylistTrack : undefined} count={source.length} />;
 
   return <Box className="music-section">
     <Box className="music-heading"><Box><Typography variant="overline" color="primary">YTGRAB MUSIC</Typography><Typography variant="h4" fontWeight={800}>Your music, your space.</Typography></Box><HeadphonesRounded className="music-heading-icon" /></Box>
@@ -318,28 +242,61 @@ export default function MusicSection({ api, active, onDownload, onNotice }) {
 
     {view === 'album' && albumPage && <>
       <Button startIcon={<ArrowBackRounded />} onClick={() => setView('search')}>Back to search</Button>
-      <Paper className="music-artist-hero music-album-hero" elevation={0}>{albumPage.album.thumbnail ? <img src={albumPage.album.thumbnail} alt="" /> : <Box className="music-album-placeholder"><LibraryMusicRounded /></Box>}<Box><Typography variant="overline" color="primary">ALBUM</Typography><Typography variant="h3" fontWeight={800} dir="auto">{albumPage.album.title}</Typography><Typography color="text.secondary" dir="auto">{albumPage.album.artist} · {albumPage.songs.length} songs</Typography>{!!albumPage.songs.length && <Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => playSong(albumPage.songs[0], albumPage.songs)}>Play album</Button>}</Box></Paper>
+      <Paper className="music-artist-hero music-album-hero" elevation={0}>{albumPage.album.thumbnail ? <img src={albumPage.album.thumbnail} alt="" /> : <Box className="music-album-placeholder"><LibraryMusicRounded /></Box>}<Box><Typography variant="overline" color="primary">ALBUM</Typography><Typography variant="h3" fontWeight={800} dir="auto">{albumPage.album.title}</Typography><Typography color="text.secondary" dir="auto">{albumPage.album.artist} · {albumPage.songs.length} songs</Typography>{!!albumPage.songs.length && <Box className="music-collection-actions"><Button variant="contained" startIcon={<PlayArrowRounded />} onClick={() => playCollection(albumPage.songs)}>Play album</Button><Button variant="outlined" startIcon={<ShuffleRounded />} onClick={() => playCollection(albumPage.songs, true)}>Shuffle</Button></Box>}</Box></Paper>
       <Box className="music-block"><Typography variant="h5" fontWeight={700}>Tracks</Typography>{albumLoading ? <Box className="music-loading"><CircularProgress /></Box> : albumPage.songs.length ? <Box className="music-song-list">{albumPage.songs.map((song, index) => row(song, index, albumPage.songs))}</Box> : <Box className="music-empty">No tracks were available for this album.</Box>}</Box>
     </>}
 
-    {view === 'library' && <Box className="music-block"><Box className="music-library-heading"><Box><Typography variant="h5" fontWeight={700}>Your library</Typography><Typography color="text.secondary">Liked songs, followed artists, and playlists.</Typography></Box><Button variant="contained" startIcon={<AddRounded />} onClick={() => setPlaylistOpen(true)}>New playlist</Button></Box>
+    {view === 'library' && <Box className="music-block">
+      <Box className="music-library-heading">
+        <Box><Typography variant="h5" fontWeight={700}>Your library</Typography><Typography color="text.secondary">Liked songs, followed artists, and playlists.</Typography></Box>
+        <Button variant="contained" startIcon={<AddRounded />} onClick={() => { setPendingPlaylistSong(null); setPlaylistOpen(true); }}>New playlist</Button>
+      </Box>
       {!selectedList && <>
-        <Box className="music-library-grid"><button onClick={() => setSelectedList('liked')}><FavoriteRounded /><strong>Liked songs</strong><small>{library.liked.length} songs</small></button>{library.playlists.map((list) => <button key={list.id} onClick={() => setSelectedList(list.id)}><LibraryMusicRounded /><strong>{list.name}</strong><small>{list.tracks.length} songs</small></button>)}</Box>
+        <Box className="music-library-grid">
+          <button onClick={() => setSelectedList('liked')}><FavoriteRounded /><strong>Liked songs</strong><small>{library.liked.length} songs</small></button>
+          {library.playlists.map((list) => <button key={list.id} onClick={() => setSelectedList(list.id)}>
+            {list.tracks[0]?.thumbnail ? <img src={list.tracks[0].thumbnail} alt="" /> : <LibraryMusicRounded />}
+            <strong dir="auto">{list.name}</strong><small>{list.tracks.length} songs</small>
+          </button>)}
+        </Box>
         {!!library.artists.length && <><Typography variant="h6" fontWeight={700}>Following</Typography><Box className="music-artists">{library.artists.map((artist) => <button key={artist.id} onClick={() => openArtist(artist.id, artist.name)}><Avatar src={artist.image} /><span dir="auto">{artist.name}</span></button>)}</Box></>}
       </>}
-      {selectedList && <><Button startIcon={<ArrowBackRounded />} onClick={() => setSelectedList(null)}>All music</Button><Box className="music-library-heading"><Typography variant="h6" fontWeight={700}>{selectedList === 'liked' ? 'Liked songs' : library.playlists.find((list) => list.id === selectedList)?.name}</Typography>{selectedList !== 'liked' && <Button color="error" onClick={() => deletePlaylist(selectedList)}>Delete playlist</Button>}</Box>{currentList.length ? <Box className="music-song-list">{currentList.map((song, index) => row(song, index, currentList))}</Box> : <Box className="music-empty">No songs here yet. Find one and add it.</Box>}</>}
+      {selectedList && <>
+        <Button startIcon={<ArrowBackRounded />} onClick={() => setSelectedList(null)}>All music</Button>
+        <Box className="music-library-heading music-playlist-title">
+          <Box><Typography variant="h5" fontWeight={800} dir="auto">{selectedList === 'liked' ? 'Liked songs' : library.playlists.find((list) => list.id === selectedList)?.name}</Typography><Typography color="text.secondary">{currentList.length} songs · your order</Typography></Box>
+          <Box className="music-playlist-actions">
+            <Button variant="contained" startIcon={<PlayArrowRounded />} disabled={!currentList.length} onClick={() => playCollection(currentList)}>Play</Button>
+            <Button variant="outlined" startIcon={<ShuffleRounded />} disabled={!currentList.length} onClick={() => playCollection(currentList, true)}>Shuffle</Button>
+            {selectedList !== 'liked' && <><IconButton aria-label="Rename playlist" title="Rename playlist" onClick={() => { setRenameName(library.playlists.find((list) => list.id === selectedList)?.name || ''); setRenameOpen(true); }}><EditRounded /></IconButton><Button color="error" onClick={() => deletePlaylist(selectedList)}>Delete</Button></>}
+          </Box>
+        </Box>
+        {currentList.length ? <Box className="music-song-list">{currentList.map((song, index) => row(song, index, currentList, selectedList !== 'liked'))}</Box> : <Box className="music-empty">No songs here yet. Find one and add it.</Box>}
+      </>}
     </Box>}
 
-    {current && <Paper className="music-player" elevation={8}>
-      <audio ref={audioRef} onTimeUpdate={(event) => { setElapsed(event.currentTarget.currentTime); if (Number.isFinite(event.currentTarget.duration)) setDuration(event.currentTarget.duration); }} onEnded={() => step(1)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} />
-      <img src={current.thumbnail} alt="" /><Box className="music-now"><strong dir="auto">{current.title}</strong><button dir="auto" onClick={() => openArtist(current.artistId, current.artist)} disabled={!current.artistId}>{current.artist}</button></Box>
-      <Box className="music-controls"><IconButton onClick={() => step(-1)} aria-label="Previous song"><SkipPreviousRounded /></IconButton><IconButton className="music-play-button" onClick={() => stream && setPlaying((value) => !value)} disabled={streamState === 'preparing'} aria-label={playing ? 'Pause' : 'Play'}>{streamState === 'preparing' ? <CircularProgress size={22} /> : playing ? <PauseRounded /> : <PlayArrowRounded />}</IconButton><IconButton onClick={() => step(1)} aria-label="Next song"><SkipNextRounded /></IconButton></Box>
-      <span className="music-player-time">{time(elapsed)}</span><Slider className="music-seek" size="small" value={duration ? Math.min(100, elapsed / duration * 100) : 0} onChangeCommitted={(_event, value) => { if (audioRef.current && duration) audioRef.current.currentTime = Number(value) / 100 * duration; }} aria-label="Seek song" /><span className="music-player-time">{time(duration)}</span>
-      <IconButton onClick={showLyrics} aria-label="Show lyrics" title="Lyrics"><LyricsRounded /></IconButton><IconButton onClick={() => onDownload(current)} aria-label="Download best audio" title="Download best audio"><DownloadRounded /></IconButton>
-    </Paper>}
+    {createPortal(<MusicPlayer
+      current={current} queue={queue} audioRef={audioRef} streamState={streamState} playing={playing}
+      elapsed={elapsed} duration={duration} shuffle={shuffle} repeat={repeat} rate={rate} volume={volume} muted={muted} sleep={sleep}
+      lyrics={lyrics} lyricsLoading={lyricsLoading} lyricsOffset={lyricsOffsets[current?.id] || 0}
+      liked={Boolean(current && library.liked.some((item) => item.id === current.id))}
+      onTimeUpdate={(event) => { setElapsed(event.currentTarget.currentTime); if (Number.isFinite(event.currentTarget.duration)) setDuration(event.currentTarget.duration); }}
+      onEnded={() => step(1, true)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+      onToggle={() => streamState === 'error' && current ? prepare(current) : setPlaying((value) => !value)} onNext={() => step(1)} onPrevious={() => step(-1)} onSeek={seek}
+      onShuffle={toggleShuffle} onRepeat={cycleRepeat}
+      onRate={setRate} onVolume={(value) => { setVolume(value); setMuted(false); }} onMute={() => setMuted((value) => !value)} onSleep={setSleepTimer}
+      onLyrics={showLyrics} onLyricsOffset={(value) => current && setLyricsOffsets((old) => ({ ...old, [current.id]: Math.max(-60, Math.min(60, value)) }))}
+      onLike={() => current && toggleLike(current)} onDownload={onDownload} onArtist={openArtist}
+      onPlayQueue={playQueue} onMoveQueue={moveQueue} onRemoveQueue={removeQueue} onClose={closePlayer}
+    />, document.body)}
 
-    <Menu anchorEl={menu?.anchor || null} open={Boolean(menu)} onClose={() => setMenu(null)}>{view === 'library' && selectedList && selectedList !== 'liked' && <MenuItem onClick={() => removeFromPlaylist(selectedList, menu.song)}>Remove from this playlist</MenuItem>}{library.playlists.length ? library.playlists.map((list) => <MenuItem key={list.id} onClick={() => addToPlaylist(list.id, menu.song)}>Add to {list.name}</MenuItem>) : <MenuItem onClick={() => { setMenu(null); setPlaylistOpen(true); }}>Create a playlist first</MenuItem>}</Menu>
-    <Dialog open={playlistOpen} onClose={() => setPlaylistOpen(false)} fullWidth maxWidth="xs"><DialogTitle>New playlist</DialogTitle><DialogContent><TextField autoFocus fullWidth label="Playlist name" value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createPlaylist()} /></DialogContent><DialogActions><Button onClick={() => setPlaylistOpen(false)}>Cancel</Button><Button variant="contained" onClick={createPlaylist}>Create</Button></DialogActions></Dialog>
-    <Dialog open={lyricsOpen} onClose={() => setLyricsOpen(false)} fullWidth maxWidth="sm"><DialogTitle>{current?.title} · Lyrics / captions</DialogTitle><DialogContent>{lyrics === null ? <CircularProgress /> : lyrics.available ? <><Typography variant="caption" color="text.secondary">Source: {lyrics.source}</Typography><Typography className="music-lyrics" dir="auto">{lyrics.text}</Typography></> : <Typography color="text.secondary">{lyrics.error || 'No lyrics or captions are available for this song.'}</Typography>}</DialogContent></Dialog>
+    <Menu anchorEl={menu?.anchor || null} open={Boolean(menu)} onClose={() => setMenu(null)}>
+      {view === 'library' && selectedList && selectedList !== 'liked' && <MenuItem onClick={() => removeFromPlaylist(selectedList, menu.song)}>Remove from this playlist</MenuItem>}
+      {library.playlists.map((list) => <MenuItem key={list.id} onClick={() => addToPlaylist(list.id, menu.song)}>Add to {list.name}</MenuItem>)}
+      <MenuItem onClick={() => { setPendingPlaylistSong(menu.song); setMenu(null); setPlaylistOpen(true); }}>New playlist with this song</MenuItem>
+    </Menu>
+    <Dialog open={playlistOpen} onClose={() => { setPlaylistOpen(false); setPendingPlaylistSong(null); }} fullWidth maxWidth="xs"><DialogTitle>New playlist</DialogTitle><DialogContent><TextField autoFocus fullWidth label="Playlist name" value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createPlaylist()} inputProps={{ maxLength: 100 }} /></DialogContent><DialogActions><Button onClick={() => { setPlaylistOpen(false); setPendingPlaylistSong(null); }}>Cancel</Button><Button variant="contained" onClick={createPlaylist}>Create</Button></DialogActions></Dialog>
+    <Dialog open={renameOpen} onClose={() => setRenameOpen(false)} fullWidth maxWidth="xs"><DialogTitle>Rename playlist</DialogTitle><DialogContent><TextField autoFocus fullWidth label="Playlist name" value={renameName} onChange={(event) => setRenameName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && renamePlaylist()} inputProps={{ maxLength: 100 }} /></DialogContent><DialogActions><Button onClick={() => setRenameOpen(false)}>Cancel</Button><Button variant="contained" onClick={renamePlaylist}>Save</Button></DialogActions></Dialog>
+
   </Box>;
 }

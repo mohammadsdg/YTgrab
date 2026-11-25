@@ -1,3 +1,5 @@
+const { parseLrc, parseVtt } = require('../music-lyrics');
+
 module.exports = function registerMusicRoutes({ app, expensiveLimiter, runYtDlp, isValidVideoId, proxiedImageUrl, pickChannelImage, readJsonFile, writeJsonFile, MUSIC_LIBRARY_FILE, axios }) {
 // ---------- music ----------
 
@@ -22,6 +24,9 @@ function musicSong(entry) {
     title: String(entry.title || 'Untitled song').slice(0, 200),
     artist: String(entry.artist || entry.channel || entry.uploader || 'Unknown artist').slice(0, 120),
     artistId,
+    album: String(entry.album || '').slice(0, 160),
+    year: Number.isInteger(Number(entry.year || entry.release_year)) && Number(entry.year || entry.release_year) >= 1900
+      ? Number(entry.year || entry.release_year) : null,
     duration: Number.isFinite(entry.duration) ? entry.duration : null,
     thumbnail: typeof entry.thumbnail === 'string' && entry.thumbnail.startsWith('/api/')
       ? entry.thumbnail : musicArtwork(entry.thumbnails, `/api/thumbnail/${entry.id}`)
@@ -153,17 +158,6 @@ app.put('/api/music/library', (req, res) => {
   res.json({ library });
 });
 
-function captionText(vtt) {
-  const lines = String(vtt).split(/\r?\n/);
-  const output = [];
-  for (const line of lines) {
-    const value = line.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim();
-    if (!value || value === 'WEBVTT' || value.includes('-->') || /^\d+$/.test(value) || /^NOTE\b/.test(value)) continue;
-    if (output[output.length - 1] !== value) output.push(value);
-  }
-  return output.join('\n').slice(0, 20_000);
-}
-
 app.get('/api/music/lyrics/:id', expensiveLimiter, async (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid song ID.' });
   const title = typeof req.query.title === 'string' ? req.query.title.trim().slice(0, 150) : '';
@@ -192,8 +186,9 @@ app.get('/api/music/lyrics/:id', expensiveLimiter, async (req, res) => {
           && (item.plainLyrics || item.syncedLyrics);
       });
       if (match) {
-        const text = String(match.plainLyrics || match.syncedLyrics).replace(/^\[\d{2}:\d{2}(?:\.\d+)?\]\s*/gm, '').slice(0, 20_000);
-        const value = { text, available: true, source: 'LRCLIB' };
+        const lines = parseLrc(match.syncedLyrics);
+        const text = String(match.plainLyrics || lines.map((line) => line.text).join('\n')).slice(0, 20_000);
+        const value = { text, lines, available: true, source: 'LRCLIB' };
         lyricsCache.set(cacheKey, { value, expires: Date.now() + 24 * 60 * 60_000 });
         return res.json(value);
       }
@@ -209,17 +204,18 @@ app.get('/api/music/lyrics/:id', expensiveLimiter, async (req, res) => {
       .find((item) => item.track?.url);
     const selected = pick(captions) || pick(automatic);
     if (!selected) {
-      const value = { text: '', available: false };
+      const value = { text: '', lines: [], available: false };
       lyricsCache.set(cacheKey, { value, expires: Date.now() + 60 * 60_000 });
       return res.json(value);
     }
     const url = new URL(selected.track.url);
     if (url.protocol !== 'https:' || !['www.youtube.com', 'youtube.com'].includes(url.hostname)) {
-      return res.json({ text: '', available: false });
+      return res.json({ text: '', lines: [], available: false });
     }
     const upstream = await axios.get(url.toString(), { responseType: 'text', timeout: 10000, maxRedirects: 0, maxContentLength: 256 * 1024 });
-    const text = captionText(upstream.data);
-    const value = { text, available: Boolean(text), language: selected.language, source: 'YouTube captions' };
+    const lines = parseVtt(upstream.data);
+    const text = lines.map((line) => line.text).join('\n').slice(0, 20_000);
+    const value = { text, lines, available: Boolean(text), language: selected.language, source: 'YouTube captions' };
     lyricsCache.set(cacheKey, { value, expires: Date.now() + 24 * 60 * 60_000 });
     res.json(value);
   } catch (error) { res.status(502).json({ error: error.message }); }

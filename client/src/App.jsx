@@ -7,7 +7,7 @@ import {
   AddRounded, ArrowBackRounded, ExploreRounded,
   GitHub,
   HeadphonesRounded, HomeRounded, SearchRounded,
-  SettingsRounded, SubscriptionsRounded, VideoLibraryRounded, AutoAwesomeRounded
+  SettingsRounded, SubscriptionsRounded, VideoLibraryRounded
 } from '@mui/icons-material';
 import MusicSection from './MusicSection';
 import Login from './components/Login';
@@ -21,7 +21,6 @@ import { api, textDirection, videoIdFromInput } from './utils';
 
 const navItems = [
   { id: 'home', label: 'Home', icon: HomeRounded },
-  { id: 'relevant', label: 'For you', icon: AutoAwesomeRounded },
   { id: 'search', label: 'Explore', icon: ExploreRounded },
   { id: 'music', label: 'Music', icon: HeadphonesRounded },
   { id: 'library', label: 'Library', icon: VideoLibraryRounded },
@@ -293,7 +292,7 @@ export default function App({ mode, setMode }) {
       finally { setLoadingMore(false); }
       return;
     }
-    if (!channelPage && ['home', 'relevant'].includes(tab) && feedHasMore) {
+    if (!channelPage && tab === 'home' && feedHasMore) {
       setLoadingMore(true);
       try {
         const next = feedPage + 1;
@@ -362,16 +361,6 @@ export default function App({ mode, setMode }) {
     finally { setFeedLoading(false); setPerformanceBusy(false); }
   };
 
-  const relevantVideos = (() => {
-    const watchedIds = new Set(history.map((item) => item.id));
-    const channelAffinity = history.reduce((scores, item, index) => {
-      if (item.channelId) scores[item.channelId] = (scores[item.channelId] || 0) + Math.max(1, 20 - index);
-      return scores;
-    }, {});
-    return [...feed]
-      .filter((video) => !watchedIds.has(video.id))
-      .sort((a, b) => ((channelAffinity[b.channelId] || 0) - (channelAffinity[a.channelId] || 0)) || ((b.timestamp || 0) - (a.timestamp || 0)));
-  })();
   const selectedVideoPlaylist = videoPlaylists.find((item) => item.id === videoPlaylistView);
 
   if (auth === null) return <Box className="splash"><CircularProgress /></Box>;
@@ -416,14 +405,6 @@ export default function App({ mode, setMode }) {
         {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Loading recent uploads…</Typography></Box>
           : feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} onPlaylist={chooseVideoPlaylist} />)}</Box>
           : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => setTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
-        {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
-      </>}
-
-      {tab === 'relevant' && <>
-        <Box className="page-heading"><Typography variant="h4" fontWeight={700}>For you</Typography><Typography color="text.secondary">Unwatched videos from your subscriptions, ranked by what you watch.</Typography></Box>
-        {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Finding relevant videos…</Typography></Box>
-          : relevantVideos.length ? <Box className="video-grid">{relevantVideos.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} onPlaylist={chooseVideoPlaylist} />)}</Box>
-          : <EmptyState icon={AutoAwesomeRounded} title="Nothing to recommend yet" text="Watch some videos and follow channels to shape this page." action={<Button onClick={() => setTab('search')}>Explore videos</Button>} />}
         {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
       </>}
 

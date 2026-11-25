@@ -103,7 +103,7 @@ button, input { font: inherit; }
 .channel-description { grid-column: 1 / -1; max-width: 900px; margin: 0 !important; white-space: pre-line; line-height: 1.8 !important; text-align: start; }
 .back-button { color: var(--muted) !important; margin-bottom: 6px !important; }
 .channel-loading { min-height: 400px; display: grid; place-items: center; }
-.mobile-dock { position: fixed; z-index: 20; left: 50%; bottom: max(12px,env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(620px,calc(100% - 24px)); height: 68px; padding: 6px; display: grid; grid-template-columns: repeat(6,1fr); border: 1px solid var(--line); border-radius: 14px !important; background: var(--surface) !important; }
+.mobile-dock { position: fixed; z-index: 20; left: 50%; bottom: max(12px,env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(620px,calc(100% - 24px)); height: 68px; padding: 6px; display: grid; grid-template-columns: repeat(5,1fr); border: 1px solid var(--line); border-radius: 14px !important; background: var(--surface) !important; }
 .mobile-dock button { border: 0; border-radius: 14px; background: transparent; color: var(--muted); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 1px; cursor: pointer; }
 .mobile-dock button svg { font-size: 22px; }
 .mobile-dock button span { font-size: 10px; font-weight: 500; }
