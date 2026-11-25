@@ -33,6 +33,7 @@ app.get('/api/search', expensiveLimiter, async (req, res) => {
       const results = allResults.slice((page - 1) * SEARCH_LIMIT, page * SEARCH_LIMIT);
       const value = { results, page, hasMore: results.length === SEARCH_LIMIT };
       searchCache.set(cacheKey, { value, expires: Date.now() + SEARCH_CACHE_TTL_MS });
+      if (searchCache.size > 120) searchCache.delete(searchCache.keys().next().value);
       res.json(value);
   } catch (error) {
     res.status(502).json({ error: error.message || 'YouTube search failed.' });
@@ -122,6 +123,7 @@ async function buildFeedPage(subscriptions, page, refresh = false) {
     const value = { videos, page, hasMore: videos.length > 0 };
     const ttl = performanceMode === 'heavy' ? 1000 * 60 * 60 : FEED_CACHE_TTL_MS;
     feedCache.set(cacheKey, { value, expires: Date.now() + ttl });
+    if (feedCache.size > 150) feedCache.delete(feedCache.keys().next().value);
     if (performanceMode === 'heavy' && page <= 2 && videos.length) {
       feedSnapshots[cacheKey] = { value, savedAt: Date.now() };
       const oldest = Object.keys(feedSnapshots).sort((a, b) => feedSnapshots[a].savedAt - feedSnapshots[b].savedAt);

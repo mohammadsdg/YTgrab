@@ -67,8 +67,9 @@ body:has(.music-player) .download-queue { bottom: 180px; }
 .np-panel-top { min-height: 42px; padding: 14px 24px 5px; display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #a99bad; font-size: 11px; }
 .np-offset { display: flex; align-items: center; gap: 6px; }
 .np-offset button { width: 25px; height: 25px; border: 1px solid rgba(255,255,255,.13); border-radius: 7px; color: #f8f5fc; background: rgba(255,255,255,.07); cursor: pointer; }
+.np-follow { border: 0; padding: 4px 8px; border-radius: 5px; background: rgba(163,79,255,.2); color: #fff; cursor: pointer; white-space: nowrap; }
 .np-lyrics-wrap { height: 100%; min-height: 0; display: flex; flex-direction: column; }
-.np-lyrics-timed { min-height: 0; flex: 1; padding: 25% 24px 35%; overflow-y: auto; scrollbar-width: thin; }
+.np-lyrics-timed { position: relative; min-height: 0; flex: 1; padding: 25% 24px 35%; overflow-y: auto; scrollbar-width: thin; }
 .np-lyrics-timed button { display: block; width: 100%; margin-bottom: 20px; border: 0; padding: 0; color: #9f91a9; background: none; font-size: clamp(18px,2vw,27px); font-weight: 700; line-height: 1.5; text-align: start; cursor: pointer; transition: color .2s, transform .2s; }
 .np-lyrics-timed button.active { color: #fff; transform: translateX(4px); text-shadow: 0 0 24px rgba(187,128,255,.55); }
 .np-lyrics-plain { padding: 20px 26px 50px; white-space: pre-line; font-size: 18px !important; line-height: 2 !important; }
@@ -110,7 +111,7 @@ body:has(.music-player) .download-queue { bottom: 180px; }
   .music-player-extra > button:not(:last-child) { display: none; }
   .np-main { grid-template-columns: 1fr; grid-template-rows: auto minmax(0,1fr); overflow: hidden; padding: 12px 15px 20px; gap: 16px; }
   .np-art-column { justify-content: flex-start; }
-  .np-art { width: min(45vw,190px,21vh); border-radius: 12px; }
+  .np-art { width: min(58vw,240px,28vh); border-radius: 8px; }
   .np-track { margin-top: 12px; }
   .np-track h4 { font-size: 19px; }
   .np-seek { margin-top: 7px; }
@@ -126,7 +127,7 @@ body:has(.music-player) .download-queue { bottom: 180px; }
   .np-header { height: 56px; flex-basis: 56px; padding: 5px 12px; }
   .np-header .MuiButton-root { min-width: 0; font-size: 12px; }
   .np-main { padding: 9px 9px max(12px,env(safe-area-inset-bottom)); gap: 10px; }
-  .np-art { width: min(42vw,155px,19vh); }
+  .np-art { width: min(56vw,210px,25vh); }
   .np-track { width: 100%; margin-top: 7px; }
   .np-track h4 { font-size: 17px; }
   .np-secondary { gap: 3px; }

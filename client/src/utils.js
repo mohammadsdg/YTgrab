@@ -1,6 +1,7 @@
 export async function api(url, options) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && url !== '/api/login' && url !== '/api/session') window.dispatchEvent(new Event('ytgrab:unauthorized'));
   if (!response.ok) throw new Error(data.error || 'Something went wrong.');
   return data;
 }

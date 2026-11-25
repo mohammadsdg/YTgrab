@@ -10,13 +10,20 @@
 
 YTgrab brings YouTube into a space you run yourself. Search and watch videos, follow channels and artists, build playlists, stream music, and keep downloads on your server. A private Telegram bot can find videos and send download links when you're away from the browser.
 
+<p align="center">
+  <img src="docs/assets/ytgrab-music-desktop.png" alt="YTgrab Music on desktop, with a personal listening home and side navigation" width="720">
+  <img src="docs/assets/ytgrab-player-mobile.png" alt="YTgrab Now Playing and synchronized lyrics on mobile" width="220">
+</p>
+
+<p align="center"><sub>Interface previews use sample library data.</sub></p>
+
 ## What you can do
 
 | Space | What you get |
 | --- | --- |
-| **Watch** | Search YouTube, follow channels, browse a personal feed, and pick up from watch history. |
-| **Listen** | Search YouTube Music for songs, artists, and albums. Open artist pages, play audio, and see lyrics when available. |
-| **Keep** | Make video and music playlists, save favorites, and download video or the best available audio. |
+| **Watch** | Search YouTube, follow channels, browse a personal feed, make video playlists, and return to watch history. |
+| **Listen** | Search songs, artists, and albums. Keep a queue across refreshes, save albums and favorites, and follow timed lyrics when available. |
+| **Keep** | Create music and video playlists, download video or the best available audio, and play saved media directly from your server. |
 | **Reach it anywhere** | Use the web interface or the optional Telegram companion. |
 
 The web interface uses a password. Your subscriptions, playlists, history, preferences, and downloaded files stay on your server.
@@ -110,9 +117,17 @@ flowchart LR
   API --> Data[(Local data and downloads)]
 ```
 
-Heavy mode keeps a snapshot of the first two feed pages. After the first fetch, those videos can appear immediately on login while the server refreshes them. Playback uses HLS segments as they become ready, and old stream cache entries are cleaned up automatically.
+Heavy mode keeps a snapshot of the first two feed pages. After the first fetch, those videos can appear immediately on login while the server refreshes them. Music is loaded only when first opened; switching away keeps the player and queue alive. Compatible saved audio plays through an authenticated HTTP Range route. Other media uses HLS segments as they become ready, and old temporary stream entries are cleaned up automatically.
 
-Video playlists are stored in `data/video-playlists.json`; music favorites, followed artists, and playlists are stored in `data/music-library.json`. The lyrics view checks [LRCLIB](https://lrclib.net/docs) when opened and falls back to available YouTube captions. Some songs have neither.
+Video playlists are stored in `data/video-playlists.json`; music favorites, saved albums, followed artists, recent listens, and playlists are stored in `data/music-library.json`. Music library saves use a revision check so edits from another browser cannot silently replace each other. Existing JSON libraries load without a migration step; the revision field is added on the next save. The player keeps queue, position, shuffle, and repeat in this browser and restores them without autoplaying. Recent listens are recorded after audio actually plays.
+
+The lyrics view checks [LRCLIB](https://lrclib.net/docs) when opened and falls back to available YouTube captions. Some songs have neither. Artist releases and categorized search results depend on what YouTube Music exposes to the server. The browser does not need a direct connection to those providers for ordinary playback and artwork.
+
+## Updating an existing installation
+
+Back up `data/` and `downloads/`, then pull the new code, run `npm install` and `npm run build`, and restart the web process (and the bot if you run it). There are no new required dependencies or environment variables. Keep the updated frontend and backend together: older clients do not send the library revision required by this server. If you roll back, restore the backed up `data/` directory before making library edits with an older version.
+
+Run `npm test` to check lyrics parsing, library conflict handling, saved audio selection, media error messages, and playback state helpers. Server diagnostics are available under Settings; they show tool availability, active jobs, and storage use without displaying credentials.
 
 ## Run it your way
 

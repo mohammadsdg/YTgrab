@@ -1,10 +1,24 @@
 const { mediaSelectionArgs, mediaError } = require('../media-formats');
+const { findSavedAudio } = require('../saved-audio');
 
-module.exports = function registerStreamRoutes({ app, expensiveLimiter, isValidVideoId, STREAM_QUALITIES, STREAM_CACHE_VERSION, STREAM_DIR, fs, path, spawn, ytDlpMediaArgs, streamJobs, MAX_ACTIVE_STREAMS, streamAccess, axios, runYtDlp, channelAvatarCache, pickChannelImage, proxiedImageUrl }) {
+module.exports = function registerStreamRoutes({ app, expensiveLimiter, isValidVideoId, STREAM_QUALITIES, STREAM_CACHE_VERSION, STREAM_DIR, fs, path, spawn, ytDlpMediaArgs, streamJobs, MAX_ACTIVE_STREAMS, streamAccess, axios, runYtDlp, channelAvatarCache, pickChannelImage, proxiedImageUrl, DOWNLOAD_DIR, DOWNLOAD_METADATA_FILE, readJsonFile }) {
+function savedAudio(id) {
+  return findSavedAudio(id, DOWNLOAD_DIR, readJsonFile(DOWNLOAD_METADATA_FILE, {}));
+}
+
+app.get('/api/audio/:id', (req, res) => {
+  if (!isValidVideoId(req.params.id)) return res.status(400).send('Invalid song ID.');
+  const file = savedAudio(req.params.id);
+  if (!file) return res.status(404).send('Saved audio unavailable.');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.sendFile(file, { acceptRanges: true });
+});
+
 app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   const videoId = req.params.id;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Invalid video ID.' });
   const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
+  if (quality === 'audio' && savedAudio(videoId)) return res.json({ status: 'done', quality, kind: 'file', url: `/api/audio/${videoId}` });
   const jobKey = `${videoId}:${quality}`;
   const finalDir = path.join(STREAM_DIR, `${videoId}-${quality}-${STREAM_CACHE_VERSION}`);
   const playlistFile = path.join(finalDir, 'index.m3u8');
@@ -63,22 +77,24 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   let downloadError = '';
   let convertError = '';
   let failed = false;
+  const lifetime = setTimeout(() => failStream('Media preparation took too long. Try again.'), 12 * 60_000);
   const failStream = (message) => {
     if (failed) return;
     failed = true;
+    clearTimeout(lifetime);
     downloader.kill('SIGKILL');
     converter.kill('SIGKILL');
     fs.rm(buildingDir, { recursive: true, force: true }, () => {});
     streamJobs[jobKey] = { status: 'error', error: message, quality, finishedAt: Date.now() };
   };
 
-  downloader.stderr.on('data', (chunk) => { downloadError += chunk.toString(); });
-  converter.stderr.on('data', (chunk) => { convertError += chunk.toString(); });
+  downloader.stderr.on('data', (chunk) => { downloadError = (downloadError + chunk.toString()).slice(-4000); });
+  converter.stderr.on('data', (chunk) => { convertError = (convertError + chunk.toString()).slice(-4000); });
   converter.stdin.on('error', (error) => {
-    if (error.code !== 'EPIPE') failStream(`Media pipeline failed: ${error.message}`);
+    if (error.code !== 'EPIPE') failStream('Media preparation failed. Try again.');
   });
-  downloader.on('error', (error) => failStream(`Could not start yt-dlp: ${error.message}`));
-  converter.on('error', (error) => failStream(`Could not start ffmpeg: ${error.message}`));
+  downloader.on('error', () => failStream('Media downloader is unavailable. Check server diagnostics.'));
+  converter.on('error', () => failStream('Media converter is unavailable. Check server diagnostics.'));
   downloader.on('close', (code) => {
     if (code !== 0 && !failed) {
       console.error(`[stream:${videoId}:${quality}] yt-dlp failed (${code}): ${downloadError.slice(-1200)}`);
@@ -87,9 +103,10 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
   });
   converter.on('close', (code) => {
     if (failed) return;
+    clearTimeout(lifetime);
     if (code !== 0 || !fs.existsSync(buildingPlaylist)) {
       console.error(`[stream:${videoId}:${quality}] ffmpeg failed (${code}): ${convertError.slice(-1200)}`);
-      failStream(convertError.slice(-800) || 'Could not create the HLS stream.');
+      failStream('Could not prepare this stream. Try another quality.');
       return;
     }
     if (fs.existsSync(finalDir)) fs.rmSync(finalDir, { recursive: true });
@@ -104,6 +121,7 @@ app.post('/api/stream/:id/prepare', expensiveLimiter, (req, res) => {
 app.get('/api/stream/:id/status', (req, res) => {
   if (!isValidVideoId(req.params.id)) return res.status(400).json({ error: 'Invalid video ID.' });
   const quality = STREAM_QUALITIES.has(String(req.query.quality)) ? String(req.query.quality) : '720';
+  if (quality === 'audio' && savedAudio(req.params.id)) return res.json({ status: 'done', quality, kind: 'file', url: `/api/audio/${req.params.id}` });
   const jobKey = `${req.params.id}:${quality}`;
   const finalPlaylist = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}`, 'index.m3u8');
   const buildingDir = path.join(STREAM_DIR, `${req.params.id}-${quality}-${STREAM_CACHE_VERSION}-building`);
@@ -191,6 +209,7 @@ app.get('/api/channel-avatar/:id', async (req, res) => {
       imageUrl = pickChannelImage(JSON.parse(raw).thumbnails, 'avatar');
       if (!imageUrl) return res.status(404).send('Avatar unavailable.');
       channelAvatarCache.set(channelId, imageUrl);
+      if (channelAvatarCache.size > 200) channelAvatarCache.delete(channelAvatarCache.keys().next().value);
     }
     const upstream = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 10000, maxRedirects: 0, maxContentLength: 10 * 1024 * 1024 });
     if (!String(upstream.headers['content-type'] || '').startsWith('image/')) return res.status(502).send('Invalid image response.');

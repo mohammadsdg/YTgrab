@@ -1,5 +1,5 @@
-import { Avatar, Box, Button, IconButton, Paper, Typography } from '@mui/material';
-import { AddRounded, ArrowBackRounded, DeleteOutlineRounded, DownloadRounded, ExpandMoreRounded, PlaylistAddRounded, VideoLibraryRounded } from '@mui/icons-material';
+import { Avatar, Box, Button, Typography } from '@mui/material';
+import { AddRounded, ArrowBackRounded, DeleteOutlineRounded, ExpandMoreRounded, PlaylistAddRounded } from '@mui/icons-material';
 import VideoCard from './VideoCard';
 import EmptyState from './EmptyState';
 import { textDirection } from '../utils';
@@ -24,8 +24,7 @@ export default function VideoLibrary({ selectedVideoPlaylist, videoPlaylists, su
           </Box>
           <button className={`history-toggle ${historyOpen ? 'open' : ''}`} onClick={() => setHistoryOpen((open) => !open)}><span>Watch history</span><span>{history.length} videos</span><ExpandMoreRounded /></button>
           {historyOpen && (history.length ? <Box className="video-grid compact">{history.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} onPlaylist={chooseVideoPlaylist} />)}</Box> : <Typography color="text.secondary">Nothing watched yet.</Typography>)}
-          <Typography className="section-title">Downloads</Typography>
-          <Box className="downloads-grid">{files.map((file) => <Paper className="file-item" key={file.name} elevation={0}>{file.thumbnail ? <img src={file.thumbnail} alt="" /> : <Box className="file-placeholder"><VideoLibraryRounded /></Box>}<Box className="file-copy"><Typography fontWeight={700} noWrap>{file.title || file.name}</Typography>{file.channel && <Typography variant="body2" color="text.secondary" noWrap>{file.channel}</Typography>}<Typography variant="caption" color="text.secondary">{(file.size / 1048576).toFixed(1)} MB</Typography></Box><Box className="file-actions"><IconButton href={file.url} aria-label="Save"><DownloadRounded /></IconButton><IconButton color="error" onClick={() => deleteFile(file)} aria-label="Delete"><DeleteOutlineRounded /></IconButton></Box></Paper>)}</Box>
+          <Box className="video-library-downloads"><Box><Typography className="section-title">Downloads</Typography><Typography color="text.secondary" variant="body2">{files.length} files saved on this server</Typography></Box><Button onClick={() => setTab('downloads')}>Open downloads</Button></Box>
         </>}
   </>;
 }

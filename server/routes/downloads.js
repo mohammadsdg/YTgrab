@@ -50,14 +50,17 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
     if (match) jobs[id].progress = parseFloat(match[1]);
   });
 
-  proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+  proc.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
 
   proc.on('error', (err) => {
-    jobs[id] = { status: 'error', error: `Could not start yt-dlp: ${err.message}`, finishedAt: Date.now() };
+    jobs[id] = { status: 'error', error: 'Media downloader is unavailable. Check server diagnostics.', finishedAt: Date.now() };
   });
 
   proc.on('close', (code) => {
     if (code !== 0) {
+      for (const name of fs.readdirSync(DOWNLOAD_DIR).filter((file) => file.startsWith(`${id}.`) && /\.(part|ytdl|temp)$/i.test(file))) {
+        fs.rm(path.join(DOWNLOAD_DIR, name), { force: true }, () => {});
+      }
       jobs[id] = { status: 'error', error: mediaError(stderr), finishedAt: Date.now() };
       return;
     }
@@ -73,6 +76,7 @@ app.post('/api/download', expensiveLimiter, (req, res) => {
       title: String(video?.title || files[0]).slice(0, 200),
       channel: String(video?.channel || '').slice(0, 100),
       channelId: typeof video?.channelId === 'string' ? video.channelId : '',
+      quality,
       downloadedAt: Date.now()
     };
     writeJsonFile(DOWNLOAD_METADATA_FILE, metadata);
@@ -102,7 +106,8 @@ app.get('/api/status/:id', (req, res) => {
 app.get('/api/files', (req, res) => {
   const metadata = readJsonFile(DOWNLOAD_METADATA_FILE, {});
   const files = fs.readdirSync(DOWNLOAD_DIR)
-    .filter((f) => !f.startsWith('.'))
+    .filter((f) => !f.startsWith('.') && !/\.(part|ytdl|temp)$/i.test(f))
+    .filter((f) => fs.lstatSync(path.join(DOWNLOAD_DIR, f)).isFile())
     .map((f) => {
       const stat = fs.statSync(path.join(DOWNLOAD_DIR, f));
       const token = makeFileToken(f);
@@ -111,12 +116,22 @@ app.get('/api/files', (req, res) => {
         size: stat.size,
         mtime: stat.mtimeMs,
         url: `/files/${encodeURIComponent(f)}?token=${token}`,
+        playUrl: `/api/media/${encodeURIComponent(f)}`,
         ...(metadata[f] || {}),
         thumbnail: metadata[f]?.id ? `/api/thumbnail/${metadata[f].id}` : ''
       };
     })
     .sort((a, b) => b.mtime - a.mtime);
   res.json({ files });
+});
+
+app.get('/api/media/:name', (req, res) => {
+  const name = req.params.name;
+  if (name !== path.basename(name)) return res.status(400).send('Invalid filename.');
+  const file = path.join(DOWNLOAD_DIR, name);
+  if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) return res.status(404).send('File not found.');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.sendFile(file, { acceptRanges: true });
 });
 
 app.delete('/api/files/:name', (req, res) => {

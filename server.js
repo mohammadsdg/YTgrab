@@ -44,6 +44,7 @@ if (COOKIES_FILE && !fs.existsSync(COOKIES_FILE)) {
   process.exit(1);
 }
 app.disable('x-powered-by');
+app.set('trust proxy', 'loopback');
 const SESSION_COOKIE = 'ytgrab_session';
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const sessions = new Map(); // token -> expiry timestamp
@@ -111,7 +112,8 @@ function parseCookies(req) {
   header.split(';').forEach((pair) => {
     const idx = pair.indexOf('=');
     if (idx === -1) return;
-    out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim());
+    try { out[pair.slice(0, idx).trim()] = decodeURIComponent(pair.slice(idx + 1).trim()); }
+    catch { /* ignore malformed cookie */ }
   });
   return out;
 }
@@ -200,7 +202,7 @@ app.post('/api/login', loginLimiter, (req, res) => {
   sessions.set(token, Date.now() + SESSION_TTL_MS);
   res.setHeader(
     'Set-Cookie',
-    `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}; SameSite=Lax`
+    `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}; SameSite=Lax${req.secure ? '; Secure' : ''}`
   );
   res.json({ ok: true });
 });
@@ -217,7 +219,7 @@ app.get('/api/session', (req, res) => {
 });
 
 app.get('/api/background', (req, res) => {
-  const file = fs.existsSync(CUSTOM_BACKGROUND_FILE) ? CUSTOM_BACKGROUND_FILE : DEFAULT_BACKGROUND_FILE;
+  const file = isAuthed(req) && fs.existsSync(CUSTOM_BACKGROUND_FILE) ? CUSTOM_BACKGROUND_FILE : DEFAULT_BACKGROUND_FILE;
   if (!fs.existsSync(file)) return res.status(404).send('Background not found.');
   res.setHeader('Cache-Control', 'no-cache');
   res.type('image/webp').sendFile(file);
@@ -273,7 +275,7 @@ app.get('/files/:name', (req, res) => {
   const name = path.basename(req.params.name); // block path traversal
   const fp = path.join(DOWNLOAD_DIR, name);
 
-  if (path.dirname(fp) !== DOWNLOAD_DIR || !fs.existsSync(fp)) {
+  if (path.dirname(fp) !== DOWNLOAD_DIR || !fs.existsSync(fp) || !fs.lstatSync(fp).isFile()) {
     return res.status(404).send('Not found.');
   }
 
@@ -362,7 +364,7 @@ function ytDlpMediaArgs(args) {
 }
 
 function acquireYtDlpMetadataSlot(priority = 'normal') {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const enter = () => {
       activeYtDlpMetadata += 1;
       resolve(() => {
@@ -372,6 +374,7 @@ function acquireYtDlpMetadataSlot(priority = 'normal') {
     };
     if (activeYtDlpMetadata < MAX_YT_DLP_METADATA) enter();
     else {
+      if (ytDlpMetadataQueue.length >= 24) return reject(new Error('The metadata server is busy. Try again shortly.'));
       const item = { enter, priority };
       const firstBackground = ytDlpMetadataQueue.findIndex((queued) => queued.priority === 'background');
       if (priority === 'background' || firstBackground < 0) ytDlpMetadataQueue.push(item);
@@ -392,7 +395,7 @@ async function runYtDlp(args, timeoutMs = 30000, priority = 'normal') {
       if (stdout.length < 8 * 1024 * 1024) stdout += chunk.toString();
       else proc.kill('SIGKILL');
     });
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString()).slice(-4000); });
     proc.on('error', (error) => {
       if (settled) return;
       settled = true;
@@ -429,12 +432,15 @@ require('./server/routes/stream')({
   app, expensiveLimiter, isValidVideoId, STREAM_QUALITIES, STREAM_CACHE_VERSION,
   STREAM_DIR, fs, path, spawn, ytDlpMediaArgs, streamJobs, MAX_ACTIVE_STREAMS,
   streamAccess, axios, runYtDlp, channelAvatarCache, pickChannelImage,
-  proxiedImageUrl
+  proxiedImageUrl, DOWNLOAD_DIR, DOWNLOAD_METADATA_FILE, readJsonFile
 });
 require('./server/routes/downloads')({
   app, expensiveLimiter, jobs, MAX_ACTIVE_DOWNLOADS, crypto, path, DOWNLOAD_DIR,
   spawn, ytDlpMediaArgs, isValidYoutubeUrl, isValidVideoId, readJsonFile,
   writeJsonFile, DOWNLOAD_METADATA_FILE, makeFileToken, fs
+});
+require('./server/routes/diagnostics')({
+  app, spawn, fs, path, DOWNLOAD_DIR, STREAM_DIR, jobs, streamJobs, MAX_STREAM_CACHE_BYTES
 });
 
 if (fs.existsSync(CLIENT_DIST)) {

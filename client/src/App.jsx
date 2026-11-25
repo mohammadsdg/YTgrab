@@ -1,39 +1,42 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   Avatar, Box, Button, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle,
   IconButton, InputAdornment, Menu, MenuItem, Paper, Snackbar, TextField, Typography
 } from '@mui/material';
 import {
-  AddRounded, ArrowBackRounded, ExploreRounded,
-  GitHub,
+  AddRounded, ArrowBackRounded, DownloadRounded,
   HeadphonesRounded, HomeRounded, SearchRounded,
   SettingsRounded, SubscriptionsRounded, VideoLibraryRounded
 } from '@mui/icons-material';
-import MusicSection from './MusicSection';
 import Login from './components/Login';
 import VideoCard from './components/VideoCard';
 import EmptyState from './components/EmptyState';
-import VideoLibrary from './components/VideoLibrary';
-import SettingsPanel from './components/SettingsPanel';
 import PlaybackDialog from './components/PlaybackDialog';
 import DownloadQueue from './components/DownloadQueue';
-import { api, textDirection, videoIdFromInput } from './utils';
+import VideoSkeleton from './components/VideoSkeleton';
+import { api, textDirection } from './utils';
+import useVideoPlayback from './video/useVideoPlayback';
+import useDownloads from './video/useDownloads';
+import useVideoSearch from './video/useVideoSearch';
+
+const MusicSection = lazy(() => import('./MusicSection'));
+const VideoLibrary = lazy(() => import('./components/VideoLibrary'));
+const DownloadsView = lazy(() => import('./components/DownloadsView'));
+const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
 
 const navItems = [
-  { id: 'home', label: 'Home', icon: HomeRounded },
-  { id: 'search', label: 'Explore', icon: ExploreRounded },
+  { id: 'home', label: 'Watch', icon: HomeRounded },
+  { id: 'search', label: 'Search', icon: SearchRounded },
   { id: 'music', label: 'Music', icon: HeadphonesRounded },
   { id: 'library', label: 'Library', icon: VideoLibraryRounded },
+  { id: 'downloads', label: 'Downloads', short: 'Saved', icon: DownloadRounded },
   { id: 'settings', label: 'Settings', icon: SettingsRounded }
 ];
 
 export default function App({ mode, setMode }) {
   const [auth, setAuth] = useState(null);
-  const [tab, setTab] = useState('home');
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
-  const [searchPage, setSearchPage] = useState(1);
-  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [tab, setTab] = useState(() => navItems.some((item) => `#${item.id}` === window.location.hash) ? window.location.hash.slice(1) : 'home');
+  const [musicMounted, setMusicMounted] = useState(tab === 'music');
   const [loadingMore, setLoadingMore] = useState(false);
   const [feed, setFeed] = useState([]);
   const [feedPage, setFeedPage] = useState(1);
@@ -48,13 +51,7 @@ export default function App({ mode, setMode }) {
   const [pendingPlaylistVideo, setPendingPlaylistVideo] = useState(null);
   const [history, setHistory] = useState([]);
   const [files, setFiles] = useState([]);
-  const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
-  const [player, setPlayer] = useState(null);
-  const [playerStatus, setPlayerStatus] = useState(null);
-  const [playerQuality, setPlayerQuality] = useState('720');
-  const playerRequestRef = useRef(0);
-  const [downloadJobs, setDownloadJobs] = useState([]);
   const [downloadChoice, setDownloadChoice] = useState(null);
   const [channelPage, setChannelPage] = useState(null);
   const [channelBusy, setChannelBusy] = useState(false);
@@ -65,6 +62,36 @@ export default function App({ mode, setMode }) {
   const [performanceMode, setPerformanceMode] = useState('chill');
   const [performanceBusy, setPerformanceBusy] = useState(false);
   const loadMoreRef = useRef(null);
+  const { downloadJobs, setDownloadJobs, startDownload } = useDownloads(setFiles);
+  const { query, setQuery, results, setResults, searchPage, setSearchPage, searchHasMore, setSearchHasMore, busy, search } = useVideoSearch(setNotice);
+  const { player, playerStatus, playerQuality, setPlayerQuality, preparePlayback, play, closePlayer } = useVideoPlayback((video) => {
+    setHistory((current) => [{ ...video, watchedAt: Date.now() }, ...current.filter((item) => item.id !== video.id)].slice(0, 100));
+    api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
+  });
+
+  useEffect(() => { if (tab === 'music') setMusicMounted(true); }, [tab]);
+
+  useEffect(() => {
+    const expired = () => setAuth(false);
+    window.addEventListener('ytgrab:unauthorized', expired);
+    return () => window.removeEventListener('ytgrab:unauthorized', expired);
+  }, []);
+
+  const navigateTab = (id) => {
+    if (!navItems.some((item) => item.id === id)) return;
+    setChannelPage(null);
+    setTab(id);
+    if (window.location.hash !== `#${id}`) window.history.pushState({ tab: id }, '', `#${id}`);
+  };
+
+  useEffect(() => {
+    const restore = () => {
+      const id = window.location.hash.slice(1);
+      if (navItems.some((item) => item.id === id)) { setChannelPage(null); setTab(id); }
+    };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
 
   const loadPersonalData = async () => {
     // Start the feed immediately; file and preference requests must not delay it.
@@ -93,24 +120,6 @@ export default function App({ mode, setMode }) {
     }).catch(() => setAuth(false));
   }, []);
 
-  const search = async () => {
-    const value = query.trim();
-    if (!value) return;
-    const directId = videoIdFromInput(value);
-    if (directId) {
-      const direct = { id: directId, title: 'YouTube video', channel: '', channelId: '', thumbnail: `/api/thumbnail/${directId}` };
-      setResults([direct]); setSearchPage(1); setSearchHasMore(false);
-      return;
-    }
-    setBusy(true);
-    try {
-      const data = await api(`/api/search?q=${encodeURIComponent(value)}&page=1`);
-      setResults(data.results); setSearchPage(1); setSearchHasMore(data.hasMore);
-    }
-    catch (err) { setNotice(err.message); }
-    finally { setBusy(false); }
-  };
-
   const toggleFollow = async (video) => {
     if (!video.channelId) return;
     const existing = subscriptions.some((item) => item.id === video.channelId);
@@ -127,49 +136,6 @@ export default function App({ mode, setMode }) {
     } catch (err) { setNotice(err.message); }
   };
 
-  const pollStream = (videoId, quality, requestId) => {
-    const check = async () => {
-      try {
-        const state = await api(`/api/stream/${videoId}/status?quality=${quality}`);
-        if (playerRequestRef.current !== requestId) return;
-        setPlayerStatus({ id: videoId, ...state });
-        if (!['done', 'error'].includes(state.status)) setTimeout(check, 1500);
-      } catch (error) {
-        if (playerRequestRef.current !== requestId) return;
-        setPlayerStatus({ id: videoId, status: 'error', error: error.message });
-      }
-    };
-    setTimeout(check, 800);
-  };
-
-  const preparePlayback = async (video, quality) => {
-    const requestId = ++playerRequestRef.current;
-    setPlayerStatus({ id: video.id, status: 'starting', progress: 0 });
-    try {
-      const state = await api(`/api/stream/${video.id}/prepare?quality=${quality}`, { method: 'POST' });
-      if (playerRequestRef.current !== requestId) return;
-      setPlayerStatus({ id: video.id, ...state });
-      if (!['done', 'error'].includes(state.status)) pollStream(video.id, quality, requestId);
-    } catch (error) {
-      if (playerRequestRef.current !== requestId) return;
-      setPlayerStatus({ id: video.id, status: 'error', error: error.message });
-    }
-  };
-
-  const play = async (video) => {
-    setPlayer(video);
-    setPlayerQuality('720');
-    setHistory((current) => [{ ...video, watchedAt: Date.now() }, ...current.filter((item) => item.id !== video.id)].slice(0, 100));
-    api('/api/history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(video) }).catch(() => {});
-    preparePlayback(video, '720');
-  };
-
-  const closePlayer = () => {
-    ++playerRequestRef.current;
-    setPlayer(null);
-    setPlayerStatus(null);
-  };
-
   const openChannel = async (channelId) => {
     if (!channelId) return;
     setChannelBusy(true);
@@ -180,34 +146,6 @@ export default function App({ mode, setMode }) {
     }
     catch (err) { setChannelPage(null); setNotice(err.message); }
     finally { setChannelBusy(false); }
-  };
-
-  const updateDownloadJob = (key, patch) => {
-    setDownloadJobs((current) => current.map((job) => job.key === key ? { ...job, ...patch } : job));
-  };
-
-  const pollDownload = (key, id) => {
-    const check = async () => {
-      try {
-        const state = await api(`/api/status/${id}`);
-        updateDownloadJob(key, state);
-        if (!['done', 'error'].includes(state.status)) setTimeout(check, 1200);
-        if (state.status === 'done') setFiles((await api('/api/files')).files);
-      } catch (error) {
-        updateDownloadJob(key, { status: 'error', error: error.message });
-      }
-    };
-    setTimeout(check, 700);
-  };
-
-  const startDownload = async (video, quality = '720') => {
-    const key = `${video.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setDownloadJobs((current) => [...current, { key, video, quality, status: 'starting', progress: 0 }]);
-    try {
-      const started = await api('/api/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: `https://www.youtube.com/watch?v=${video.id}`, quality, video }) });
-      updateDownloadJob(key, { id: started.id, status: 'processing' });
-      pollDownload(key, started.id);
-    } catch (error) { updateDownloadJob(key, { status: 'error', error: error.message }); }
   };
 
   const chooseDownload = (video, anchor) => setDownloadChoice({ video, anchor });
@@ -373,7 +311,8 @@ export default function App({ mode, setMode }) {
   return <Box className={`app-shell ${tab === 'music' ? 'music-active' : ''}`}>
     <Box component="header" className="topbar">
       <img className="brand-mark small" src="/ytgrab-mark.png" alt="YTgrab" />
-      <IconButton className="github-button" component="a" href="https://github.com/mohammadsdg/Ytgrab" target="_blank" rel="noreferrer" aria-label="Open YTgrab on GitHub"><GitHub /></IconButton>
+      <Typography className="topbar-destination">{navItems.find((item) => item.id === tab)?.label || 'YTgrab'}</Typography>
+      <IconButton className="topbar-settings" onClick={() => navigateTab('settings')} aria-label="Open settings"><SettingsRounded /></IconButton>
     </Box>
 
     <Box component="main" className="main-content">
@@ -402,9 +341,9 @@ export default function App({ mode, setMode }) {
       </> : <>
       {tab === 'home' && <>
         <Box className="page-heading"><Typography variant="h4" fontWeight={700}>Latest</Typography><Typography color="text.secondary">New videos from channels you follow.</Typography></Box>
-        {feedLoading && !feed.length ? <Box className="feed-loading"><CircularProgress size={30} /><Typography color="text.secondary">Loading recent uploads…</Typography></Box>
+        {feedLoading && !feed.length ? <VideoSkeleton />
           : feed.length ? <Box className="video-grid">{feed.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} onPlaylist={chooseVideoPlaylist} />)}</Box>
-          : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => setTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
+          : <EmptyState icon={SubscriptionsRounded} title="Your feed starts with people" text="Follow a few channels and their newest videos will show up here." action={<Button onClick={() => navigateTab('search')} startIcon={<AddRounded />}>Find channels</Button>} />}
         {feed.length > 0 && <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>}
       </>}
 
@@ -412,35 +351,37 @@ export default function App({ mode, setMode }) {
         <Box className="search-hero">
           <Typography variant="h4" fontWeight={700}>Search</Typography>
           <Typography color="text.secondary">Find a video or paste a YouTube link.</Typography>
-          <TextField className="big-search" fullWidth value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" inputProps={{ dir: 'auto' }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
+          <TextField className="big-search" fullWidth value={query} onChange={(e) => { setQuery(e.target.value); setSearchHasMore(false); }} onKeyDown={(e) => e.key === 'Enter' && search()} placeholder="Linux, cooking, a video link…" inputProps={{ dir: 'auto' }} InputProps={{ startAdornment: <InputAdornment position="start"><SearchRounded /></InputAdornment>, endAdornment: <Button onClick={search} disabled={busy}>{busy ? 'Looking…' : 'Search'}</Button> }} />
         </Box>
         <Box className="video-grid">{results.map((video) => <VideoCard key={video.id} video={video} subscriptions={subscriptions} onFollow={toggleFollow} onPlay={play} onDownload={chooseDownload} onChannel={openChannel} onPlaylist={chooseVideoPlaylist} />)}</Box>
         <Box ref={loadMoreRef} className="load-more-sentinel">{loadingMore && <CircularProgress size={26} />}</Box>
       </>}
 
       <Box sx={{ display: tab === 'music' ? 'block' : 'none' }}>
-        <MusicSection api={api} active={tab === 'music'} onNotice={setNotice} onDownload={(track) => startDownload({ ...track, channel: track.artist, channelId: track.artistId }, 'audio')} />
+        {musicMounted && <Suspense fallback={<Box className="music-loading">Opening music…</Box>}><MusicSection api={api} active={tab === 'music'} onNotice={setNotice} onDownload={(track) => startDownload({ ...track, channel: track.artist, channelId: track.artistId }, 'audio')} /></Suspense>}
       </Box>
 
-      {tab === 'library' && <VideoLibrary
+      {tab === 'library' && <Suspense fallback={<Box className="music-loading">Opening library…</Box>}><VideoLibrary
         selectedVideoPlaylist={selectedVideoPlaylist} videoPlaylists={videoPlaylists} subscriptions={subscriptions}
         history={history} files={files} historyOpen={historyOpen} setHistoryOpen={setHistoryOpen}
-        setTab={setTab} setVideoPlaylistView={setVideoPlaylistView} setPendingPlaylistVideo={setPendingPlaylistVideo}
+        setTab={navigateTab} setVideoPlaylistView={setVideoPlaylistView} setPendingPlaylistVideo={setPendingPlaylistVideo}
         setVideoPlaylistDialog={setVideoPlaylistDialog} openChannel={openChannel} toggleFollow={toggleFollow}
         play={play} chooseDownload={chooseDownload} chooseVideoPlaylist={chooseVideoPlaylist}
         removeVideoFromPlaylist={removeVideoFromPlaylist} deleteVideoPlaylist={deleteVideoPlaylist} deleteFile={deleteFile}
-      />}
+      /></Suspense>}
 
-      {tab === 'settings' && <SettingsPanel
+      {tab === 'downloads' && <Suspense fallback={<Box className="music-loading">Opening downloads…</Box>}><DownloadsView files={files} jobs={downloadJobs} onDelete={deleteFile} onRetry={(job) => startDownload(job.video, job.quality)} /></Suspense>}
+
+      {tab === 'settings' && <Suspense fallback={<Box className="music-loading">Opening settings…</Box>}><SettingsPanel
         mode={mode} setMode={setMode} performanceMode={performanceMode} performanceBusy={performanceBusy}
         changePerformanceMode={changePerformanceMode} backgroundBusy={backgroundBusy}
         uploadBackground={uploadBackground} resetBackground={resetBackground} setAuth={setAuth}
-      />}
+      /></Suspense>}
       </>}
     </Box>
 
     <Paper component="nav" className="mobile-dock" elevation={0}>
-      {navItems.map(({ id, label, icon: Icon }) => <button key={id} className={!channelPage && tab === id ? 'active' : ''} onClick={() => { setChannelPage(null); setTab(id); }}><Icon /><span>{label}</span></button>)}
+      {navItems.map(({ id, label, short, icon: Icon }) => <button key={id} className={!channelPage && tab === id ? 'active' : ''} onClick={() => navigateTab(id)} aria-current={!channelPage && tab === id ? 'page' : undefined}><Icon /><span className="nav-label-full">{label}</span><span className="nav-label-short">{short || label}</span></button>)}
     </Paper>
 
     <PlaybackDialog player={player} closePlayer={closePlayer} playerQuality={playerQuality} setPlayerQuality={setPlayerQuality} preparePlayback={preparePlayback} playerStatus={playerStatus} setNotice={setNotice} chooseVideoPlaylist={chooseVideoPlaylist} />

@@ -1,10 +1,11 @@
 const { parseLrc, parseVtt } = require('../music-lyrics');
+const { readMusicLibrary, putMusicLibrary } = require('../music-library-store');
 
 module.exports = function registerMusicRoutes({ app, expensiveLimiter, runYtDlp, isValidVideoId, proxiedImageUrl, pickChannelImage, readJsonFile, writeJsonFile, MUSIC_LIBRARY_FILE, axios }) {
 // ---------- music ----------
 
-const EMPTY_MUSIC_LIBRARY = { liked: [], artists: [], playlists: [], recent: [] };
 const musicSearchCache = new Map();
+const musicSearchRequests = new Map();
 const artistCache = new Map();
 const lyricsCache = new Map();
 
@@ -54,7 +55,9 @@ function musicAlbum(entry) {
     id,
     title: String(entry.title || 'Untitled album').slice(0, 200),
     artist: String(entry.artist || entry.channel || entry.uploader || '').slice(0, 120),
-    thumbnail: musicArtwork(entry.thumbnails)
+    thumbnail: typeof entry.thumbnail === 'string' && entry.thumbnail.startsWith('/api/')
+      ? entry.thumbnail : musicArtwork(entry.thumbnails),
+    year: Number(entry.release_year || entry.year) || null
   };
 }
 
@@ -66,25 +69,41 @@ app.get('/api/music/search', expensiveLimiter, async (req, res) => {
   const cached = musicSearchCache.get(key);
   if (cached?.expires > Date.now()) return res.json(cached.value);
   try {
+    if (musicSearchRequests.has(key)) return res.json(await musicSearchRequests.get(key));
+    const request = (async () => {
     const url = `https://music.youtube.com/search?q=${encodeURIComponent(query)}#${type}`;
     let entries;
+    let unavailable = false;
     try {
       const raw = await runYtDlp(['--flat-playlist', '--playlist-end', '24', '--dump-single-json', '--no-warnings', url], 35000);
       entries = JSON.parse(raw).entries || [];
     } catch {
       entries = [];
+      unavailable = true;
     }
-    if (!entries.length && type !== 'albums') {
+    if (!entries.length && type === 'songs') {
       // Music search is not available on every YouTube session. Keep search usable.
       const raw = await runYtDlp(['--flat-playlist', '--dump-single-json', '--no-warnings', `ytsearch24:${query} music`], 35000);
       entries = JSON.parse(raw).entries || [];
+      unavailable = false;
     }
     const mapper = type === 'artists' ? musicArtist : type === 'albums' ? musicAlbum : musicSong;
     const items = entries.map(mapper).filter(Boolean);
-    const value = { items: [...new Map(items.map((item) => [item.id, item])).values()] };
+    if (type === 'songs') {
+      const wantsVariant = /\b(live|cover|remix|karaoke|slowed|sped up)\b/i.test(query);
+      if (!wantsVariant) items.sort((a, b) =>
+        Number(/\b(live|cover|remix|karaoke|slowed|sped up)\b/i.test(a.title))
+        - Number(/\b(live|cover|remix|karaoke|slowed|sped up)\b/i.test(b.title)));
+    }
+    const value = { items: [...new Map(items.map((item) => [item.id, item])).values()], unavailable };
     musicSearchCache.set(key, { value, expires: Date.now() + 5 * 60_000 });
-    res.json(value);
-  } catch (error) { res.status(502).json({ error: error.message }); }
+    if (musicSearchCache.size > 120) musicSearchCache.delete(musicSearchCache.keys().next().value);
+    return value;
+    })();
+    musicSearchRequests.set(key, request);
+    try { res.json(await request); }
+    finally { musicSearchRequests.delete(key); }
+  } catch { res.status(502).json({ error: 'Music search is unavailable right now. Try again.' }); }
 });
 
 app.get('/api/music/albums/:id', expensiveLimiter, async (req, res) => {
@@ -100,9 +119,10 @@ app.get('/api/music/albums/:id', expensiveLimiter, async (req, res) => {
     res.json({ album: {
       id, title: String(data.title || 'Album').slice(0, 200),
       artist: String(data.artist || data.channel || data.uploader || songs[0]?.artist || '').slice(0, 120),
-      thumbnail: musicArtwork(data.thumbnails, songs[0]?.thumbnail || '')
+      thumbnail: musicArtwork(data.thumbnails, songs[0]?.thumbnail || ''),
+      year: Number(data.release_year || data.year) || null
     }, songs });
-  } catch (error) { res.status(502).json({ error: error.message }); }
+  } catch { res.status(502).json({ error: 'Could not load this album. Try again.' }); }
 });
 
 app.get('/api/music/artists/:id', expensiveLimiter, async (req, res) => {
@@ -133,29 +153,51 @@ app.get('/api/music/artists/:id', expensiveLimiter, async (req, res) => {
       songs: [...new Map(songs.map((song) => [song.id, song])).values()]
     };
     artistCache.set(id, { value, expires: Date.now() + 10 * 60_000 });
+    if (artistCache.size > 100) artistCache.delete(artistCache.keys().next().value);
     res.json(value);
-  } catch (error) { res.status(502).json({ error: error.message }); }
+  } catch { res.status(502).json({ error: 'Could not load this artist. Try again.' }); }
+});
+
+app.get('/api/music/artists/:id/releases', expensiveLimiter, async (req, res) => {
+  const id = req.params.id;
+  if (!/^UC[A-Za-z0-9_-]{20,30}$/.test(id)) return res.status(400).json({ error: 'Invalid artist ID.' });
+  const key = `${id}:releases`;
+  const cached = artistCache.get(key);
+  if (cached?.expires > Date.now()) return res.json(cached.value);
+  const paths = ['albums', 'singles'];
+  const attempts = await Promise.allSettled(paths.map(async (section) => {
+    const raw = await runYtDlp(['--flat-playlist', '--playlist-end', '30', '--dump-single-json', '--no-warnings',
+      `https://music.youtube.com/channel/${id}/${section}`], 35000);
+    return (JSON.parse(raw).entries || []).map(musicAlbum).filter(Boolean);
+  }));
+  const value = { albums: attempts[0].status === 'fulfilled' ? attempts[0].value : [],
+    singles: attempts[1].status === 'fulfilled' ? attempts[1].value : [],
+    available: attempts.some((item) => item.status === 'fulfilled') };
+  if (value.available) artistCache.set(key, { value, expires: Date.now() + 30 * 60_000 });
+  res.json(value);
 });
 
 app.get('/api/music/library', (req, res) => {
-  res.json({ library: { ...EMPTY_MUSIC_LIBRARY, ...readJsonFile(MUSIC_LIBRARY_FILE, {}) } });
+  res.json(readMusicLibrary(readJsonFile, MUSIC_LIBRARY_FILE));
 });
 
 app.put('/api/music/library', (req, res) => {
   const input = req.body?.library;
-  if (!input || !['liked', 'artists', 'playlists', 'recent'].every((field) => Array.isArray(input[field]))) {
+  if (!input || !['liked', 'artists', 'playlists', 'recent'].every((field) => Array.isArray(input[field])) || (input.albums != null && !Array.isArray(input.albums))) {
     return res.status(400).json({ error: 'Invalid music library.' });
   }
   const liked = input.liked.slice(0, 500).map(musicSong).filter(Boolean);
-  const recent = input.recent.slice(0, 30).map(musicSong).filter(Boolean);
+  const recent = input.recent.slice(0, 100).map(musicSong).filter(Boolean);
   const artists = input.artists.slice(0, 200).map(musicArtist).filter(Boolean);
+  const albums = (input.albums || []).slice(0, 200).map(musicAlbum).filter(Boolean);
   const playlists = input.playlists.slice(0, 100).filter((item) => typeof item?.id === 'string' && typeof item?.name === 'string').map((item) => ({
     id: item.id.slice(0, 50), name: item.name.trim().slice(0, 100),
     tracks: (Array.isArray(item.tracks) ? item.tracks : []).slice(0, 500).map(musicSong).filter(Boolean)
   }));
-  const library = { liked, artists, playlists, recent };
-  writeJsonFile(MUSIC_LIBRARY_FILE, library);
-  res.json({ library });
+  const result = putMusicLibrary({ readJsonFile, writeJsonFile, file: MUSIC_LIBRARY_FILE,
+    revision: req.body.revision, library: { liked, artists, albums, playlists, recent } });
+  if (result.conflict) return res.status(409).json({ error: 'Music library changed in another session.', ...result });
+  res.json(result);
 });
 
 app.get('/api/music/lyrics/:id', expensiveLimiter, async (req, res) => {

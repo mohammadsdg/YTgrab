@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "build": "vite build --config client/vite.config.js",
-    "test": "node tests/music-lyrics.test.js",
+    "test": "node --test tests/*.test.js",
     "dev": "concurrently --kill-others --names api,ui \"node server.js\" \"vite --config client/vite.config.js\"",
     "prestart": "npm run build",
     "start": "concurrently --kill-others --names web,telegram \"node server.js\" \"node telegram-bot.js\"",

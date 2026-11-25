@@ -7,6 +7,7 @@ import '@fontsource/vazirmatn/600.css';
 import '@fontsource/vazirmatn/700.css';
 import App from './App';
 import './styles.css';
+import './product.css';
 
 function Root() {
   const [mode, setMode] = useState(() => localStorage.getItem('ytgrab_theme') || 'dark');
